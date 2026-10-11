@@ -24,10 +24,7 @@ jobs:
           git fetch upstream main
           git fetch origin
       - name: Re-apply patches onto upstream/main
-        run: |
-          git checkout -B dev upstream/main
-          for b in linux-window-controls system-theme-detection fix/x11-desktop-dpi; do git merge --no-edit origin/$b || (echo "conflict in $b"; exit 1); done
-          git diff --check
+        run: bash tools/sync-dev.sh --no-push
       - name: Push dev
         if: ${{ github.event.inputs.dry_run != 'true' }}
         run: git push origin dev --force-with-lease
