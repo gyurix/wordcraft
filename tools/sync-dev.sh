@@ -30,6 +30,9 @@ for b in $PATCHES; do
   fi
 done
 rm -rf vendor/winit/target
+# Preserve sync automation (patch branches don't carry it)
+git checkout origin/main -- tools/sync-dev.sh .github/workflows/sync-dev.yml .gitignore 2>/dev/null || true
+git status --short | grep -q . && git commit -m "chore(dev): preserve sync automation" || true
 git diff --check
 echo "dev now $(git rev-parse --short HEAD) / $(git log --oneline upstream/main..dev | wc -l) commits ahead"
 if [ "$DRY" = 1 ]; then echo "(dry-run, not pushing)"; exit 0; fi
