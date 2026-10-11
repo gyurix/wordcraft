@@ -1,0 +1,54 @@
+name: build-dev
+
+# Linux binaries of dev (upstream/main + re-applied patches), so the local
+# updater can install them without compiling. Triggered by every dev push
+# (sync-dev pushes dev) and manually.
+on:
+  push:
+    branches: [dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CRAFT_FONTS_REF: 8dcdacd5153e64560d109541a47d806f26f048c0
+  CRAFT_FONTS_REQUIRED: 1
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Check out craft-fonts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: storytold/craft-fonts
+          ref: ${{ env.CRAFT_FONTS_REF }}
+          path: craft-fonts
+      - name: Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libasound2-dev libxkbcommon-dev libwayland-dev libx11-dev libxrandr-dev libxi-dev libgl1-mesa-dev
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: build-dev
+      - name: Build Linux packages
+        env:
+          CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
+        run: packaging/linux/package.sh --formats "deb tar"
+      - name: Upload dev packages
+        uses: actions/upload-artifact@cf430e0d3b9d553b3636b5943f2c94e0c5154cbc # v7.0.2
+        with:
+          name: wordcraft-dev-linux
+          path: |
+            dist/release/wordcraft-*-linux-*.deb
+            dist/release/wordcraft-*-linux-*.tar.gz
+          if-no-files-found: error
+          retention-days: 14
