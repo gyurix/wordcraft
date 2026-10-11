@@ -22,7 +22,7 @@ for b in $PATCHES; do
         git add Cargo.lock
         git commit --no-edit
       else
-        echo "CONFLICT merging $b — aborting"; git merge --abort; exit 1
+        echo "CONFLICT merging $b — aborting"; git merge --abort 2>/dev/null || true; exit 1
       fi
     fi
   else
