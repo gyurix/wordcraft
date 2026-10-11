@@ -259,6 +259,9 @@ instead, without setting anything. The log file records the choice (lines starti
 
 RISC-V (riscv64): `wordcraft-<ver>-linux-riscv64.tar.gz`, a tarball cross-compiled for glibc 2.39+
 (Ubuntu 24.04, Debian 13 and newer).
+On Linux and FreeBSD, WordCraft's own title bar carries minimize, maximize and close, as in Word,
+and the window manager draws no second title bar above it. Set `WORDCRAFT_SYSTEM_TITLEBAR=1` to
+keep the window manager's title bar instead.
 
 ### FreeBSD
 
