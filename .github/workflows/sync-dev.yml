@@ -23,6 +23,10 @@ jobs:
           git remote add upstream https://github.com/storytold/wordcraft.git 2>/dev/null || git remote set-url upstream https://github.com/storytold/wordcraft.git
           git fetch upstream main
           git fetch origin
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
       - name: Re-apply patches onto upstream/main
         run: bash tools/sync-dev.sh --no-push
       - name: Push dev
