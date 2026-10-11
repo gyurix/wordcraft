@@ -44,7 +44,7 @@ jobs:
           CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
         run: packaging/linux/package.sh --formats "deb tar"
       - name: Upload dev packages
-        uses: actions/upload-artifact@cf430e0d3b9d553b3636b5943f2c94e0c5154cbc # v7.0.2
+        uses: actions/upload-artifact@v4
         with:
           name: wordcraft-dev-linux
           path: |
