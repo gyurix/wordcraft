@@ -51,4 +51,4 @@ jobs:
             dist/release/wordcraft-*-linux-*.deb
             dist/release/wordcraft-*-linux-*.tar.gz
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 3

@@ -7,6 +7,16 @@ DRY=0; PUSH=1
 for a in "$@"; do case "$a" in --dry-run) DRY=1;; --no-push) PUSH=0;; esac; done
 git fetch upstream main
 git fetch origin
+# Skip when dev already contains latest upstream + all patches (no rebuild, no push, no CI build).
+if git rev-parse --verify origin/dev >/dev/null 2>&1; then
+  UP2DATE=1
+  git merge-base --is-ancestor upstream/main origin/dev || UP2DATE=0
+  for b in $PATCHES; do
+    git rev-parse --verify "origin/$b" >/dev/null 2>&1 || continue
+    git merge-base --is-ancestor "origin/$b" origin/dev || UP2DATE=0
+  done
+  if [ "$UP2DATE" = 1 ]; then echo "dev already up to date, nothing to do"; exit 0; fi
+fi
 rm -rf vendor/winit/target
 git checkout -B dev upstream/main
 for b in $PATCHES; do
