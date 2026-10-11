@@ -1,0 +1,13 @@
+/home/gyurix/code/craft/wordcraft/vendor/winit/target/debug/build/thiserror-impl/8f705f7a3fd5e228/out/thiserror_impl-8f705f7a3fd5e228.d: /opt/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-impl-1.0.63/src/lib.rs /opt/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-impl-1.0.63/src/ast.rs /opt/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-impl-1.0.63/src/attr.rs /opt/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-impl-1.0.63/src/expand.rs /opt/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-impl-1.0.63/src/fmt.rs /opt/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-impl-1.0.63/src/generics.rs /opt/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-impl-1.0.63/src/prop.rs /opt/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-impl-1.0.63/src/span.rs /opt/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-impl-1.0.63/src/valid.rs
+
+/home/gyurix/code/craft/wordcraft/vendor/winit/target/debug/build/thiserror-impl/8f705f7a3fd5e228/out/libthiserror_impl-8f705f7a3fd5e228.so: /opt/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-impl-1.0.63/src/lib.rs /opt/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-impl-1.0.63/src/ast.rs /opt/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-impl-1.0.63/src/attr.rs /opt/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-impl-1.0.63/src/expand.rs /opt/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-impl-1.0.63/src/fmt.rs /opt/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-impl-1.0.63/src/generics.rs /opt/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-impl-1.0.63/src/prop.rs /opt/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-impl-1.0.63/src/span.rs /opt/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-impl-1.0.63/src/valid.rs
+
+/opt/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-impl-1.0.63/src/lib.rs:
+/opt/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-impl-1.0.63/src/ast.rs:
+/opt/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-impl-1.0.63/src/attr.rs:
+/opt/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-impl-1.0.63/src/expand.rs:
+/opt/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-impl-1.0.63/src/fmt.rs:
+/opt/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-impl-1.0.63/src/generics.rs:
+/opt/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-impl-1.0.63/src/prop.rs:
+/opt/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-impl-1.0.63/src/span.rs:
+/opt/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-impl-1.0.63/src/valid.rs:
