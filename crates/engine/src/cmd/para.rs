@@ -1,10 +1,11 @@
 //! Paragraph formatting, lists and styles (Home › Paragraph, Home › Styles).
 
 use serde_json::{Value, json};
+use wordcraft_doc::collate::{SortKey, sort_key};
 use wordcraft_doc::numbering::ListKind;
 use wordcraft_doc::props::{Align, Border, BorderStyle, Borders, LineSpacing, NumRef, ParaProps, Rgb, TabAlign, TabLeader, TabStop};
 use wordcraft_doc::styles::{Style, StyleKind};
-use wordcraft_doc::{Block, Pos};
+use wordcraft_doc::{Block, CharProps, Pos};
 
 use super::sel_result;
 use crate::{CmdError, CmdResult, CommandSpec, Session, p};
@@ -43,6 +44,7 @@ pub fn specs() -> Vec<CommandSpec> {
                 let l = p.indent_left.unwrap_or(0.0) + 36.0;
                 p.indent_left = Some(l);
                 p.indent_first = Some(-36.0);
+                p.cancel_char_indents(true, false, true);
             })
         })
         .key("Mod+T"),
@@ -50,6 +52,7 @@ pub fn specs() -> Vec<CommandSpec> {
             fmt(s, &|p| {
                 p.indent_left = Some((p.indent_left.unwrap_or(0.0) - 36.0).max(0.0));
                 p.indent_first = Some(0.0);
+                p.cancel_char_indents(true, false, true);
             })
         })
         .key("Mod+Shift+T"),
@@ -65,6 +68,7 @@ pub fn specs() -> Vec<CommandSpec> {
                 if let Some(x) = f {
                     p.indent_first = Some(x.clamp(-1584.0, 1584.0));
                 }
+                p.cancel_char_indents(l.is_some(), r.is_some(), f.is_some());
             })
         })
         .params(r#"{"left"?: pt, "right"?: pt, "firstLine"?: pt (negative = hanging)}"#),
@@ -75,6 +79,11 @@ pub fn specs() -> Vec<CommandSpec> {
         CommandSpec::new("para.oneAndHalf", "1.5 Line Spacing", "Home › Paragraph › Line Spacing", |s, _| ls(s, LineSpacing::Multiple(1.5))).key("Mod+5"),
         CommandSpec::new("para.spacing", "Paragraph Spacing", "Layout › Paragraph", |s, v| {
             let (b, a) = (p::f32(v, "before"), p::f32(v, "after"));
+            let (b_auto, a_auto) = (p::bool(v, "beforeAuto"), p::bool(v, "afterAuto"));
+            // A number replaces automatic spacing, as typing one in Word's Paragraph dialog does.
+            let rp = cur(s);
+            let b_auto = b_auto.or((b.is_some() && rp.before_auto).then_some(false));
+            let a_auto = a_auto.or((a.is_some() && rp.after_auto).then_some(false));
             fmt(s, &|p| {
                 if let Some(x) = b {
                     p.space_before = Some(x.clamp(0.0, 1584.0));
@@ -82,23 +91,49 @@ pub fn specs() -> Vec<CommandSpec> {
                 if let Some(x) = a {
                     p.space_after = Some(x.clamp(0.0, 1584.0));
                 }
+                if let Some(on) = b_auto {
+                    p.space_before_auto = Some(on);
+                }
+                if let Some(on) = a_auto {
+                    p.space_after_auto = Some(on);
+                }
             })
         })
-        .params(r#"{"before"?: pt, "after"?: pt}"#),
+        .params(r#"{"before"?: pt, "after"?: pt, "beforeAuto"?: bool, "afterAuto"?: bool (automatic, HTML-style spacing: 14 pt)}"#),
         CommandSpec::new("para.addSpaceBefore", "Add Space Before Paragraph", "Home › Paragraph › Line Spacing", |s, _| {
-            let has = cur(s).space_before > 0.0;
-            fmt(s, &|p| p.space_before = Some(if has { 0.0 } else { 12.0 }))
+            let rp = cur(s);
+            let has = rp.space_before > 0.0;
+            fmt(s, &|p| {
+                p.space_before = Some(if has { 0.0 } else { 12.0 });
+                if rp.before_auto {
+                    p.space_before_auto = Some(false);
+                }
+            })
         })
         .key("Mod+0"),
         CommandSpec::new("para.removeSpaceAfter", "Remove Space After Paragraph", "Home › Paragraph › Line Spacing", |s, _| {
-            let has = cur(s).space_after > 0.0;
-            fmt(s, &|p| p.space_after = Some(if has { 0.0 } else { 8.0 }))
+            let rp = cur(s);
+            let has = rp.space_after > 0.0;
+            fmt(s, &|p| {
+                p.space_after = Some(if has { 0.0 } else { 8.0 });
+                if rp.after_auto {
+                    p.space_after_auto = Some(false);
+                }
+            })
         }),
         // Back to the paragraph style: direct indents, spacing, alignment… go; the style, list
         // membership and drop cap stay. ⌘Q quits on macOS, so Word for Mac uses ⌃Q.
         CommandSpec::new("para.reset", "Reset Paragraph Formatting", "Home › Paragraph", |s, _| {
             fmt(s, &|p| {
-                *p = ParaProps { style: p.style.take(), numbering: p.numbering.take(), drop_cap: p.drop_cap.take(), ..Default::default() }
+                *p = ParaProps {
+                    style: p.style.take(),
+                    numbering: p.numbering.take(),
+                    drop_cap: p.drop_cap.take(),
+                    drop_cap_margin: p.drop_cap_margin.take(),
+                    drop_cap_distance: p.drop_cap_distance.take(),
+                    drop_cap_font: p.drop_cap_font.take(),
+                    ..Default::default()
+                }
             })
         })
         .key(super::mac_or("Ctrl+Q", "Mod+Q")),
@@ -138,14 +173,18 @@ pub fn specs() -> Vec<CommandSpec> {
             r#"{"kind": "bottom|top|left|right|none|all|outside|inside|horizontalLine", "width"?: pt, "color"?: "RRGGBB", "style"?: "single|double|dotted|dashed|thick|triple|dotDash|wave", "sides"?: Sides} where Sides = {"top"|"left"|"bottom"|"right"|"between": {"style"?, "width"?: pt, "color"?: "RRGGBB"} | null}: exactly these sides (others off), instead of `kind`"#,
         ),
         CommandSpec::new("para.sort", "Sort", "Home › Paragraph", sort).params(r#"{"descending"?: bool}"#),
-        CommandSpec::new("para.keepNext", "Keep with Next", "Home › Paragraph › Line and Page Breaks", |s, v| tog(s, v, |p| p.keep_next, |p, b| p.keep_next = Some(b))),
-        CommandSpec::new("para.keepLines", "Keep Lines Together", "Home › Paragraph › Line and Page Breaks", |s, v| tog(s, v, |p| p.keep_lines, |p, b| p.keep_lines = Some(b))),
+        CommandSpec::new("para.keepNext", "Keep with Next", "Home › Paragraph › Line and Page Breaks", |s, v| tog(s, v, |p| p.keep_next, |p, b| p.keep_next = Some(b)))
+            .params(r#"{"value"?: bool}"#),
+        CommandSpec::new("para.keepLines", "Keep Lines Together", "Home › Paragraph › Line and Page Breaks", |s, v| tog(s, v, |p| p.keep_lines, |p, b| p.keep_lines = Some(b)))
+            .params(r#"{"value"?: bool}"#),
         CommandSpec::new("para.pageBreakBefore", "Page Break Before", "Home › Paragraph › Line and Page Breaks", |s, v| {
             tog(s, v, |p| p.page_break_before, |p, b| p.page_break_before = Some(b))
-        }),
+        })
+        .params(r#"{"value"?: bool}"#),
         CommandSpec::new("para.widowControl", "Widow/Orphan Control", "Home › Paragraph › Line and Page Breaks", |s, v| {
             tog(s, v, |p| p.widow_control, |p, b| p.widow_control = Some(b))
-        }),
+        })
+        .params(r#"{"value"?: bool}"#),
         CommandSpec::new("para.asianTypography", "Asian Typography", "Home › Paragraph › Asian Typography", asian_typography).params(
             r#"{"kinsoku"?: bool (East Asian line-breaking rules), "wordWrap"?: bool (false: Latin words may break at any character), "overflowPunct"?: bool (hanging punctuation), "topLinePunct"?: bool (compress punctuation at the start of a line), "autoSpaceDE"?: bool (space between Asian and Latin text), "autoSpaceDN"?: bool (space between Asian text and numbers)} — flags left out stay as they are; returns the flags at the caret"#,
         ),
@@ -156,11 +195,9 @@ pub fn specs() -> Vec<CommandSpec> {
             let l = p::u64(v, "level").map(|x| x.min(9) as u8);
             fmt(s, &|p| p.outline_level = l)
         }),
-        CommandSpec::new("para.set", "Set Paragraph Formatting", "Home › Paragraph › Paragraph", |s, v| {
-            let props: ParaProps = serde_json::from_value(v.get("props").cloned().unwrap_or(Value::Null)).map_err(|e| CmdError::Params(e.to_string()))?;
-            fmt(s, &|p| p.overlay(&props))
-        })
-        .params(r#"{"props": ParaProps}"#),
+        CommandSpec::new("para.set", "Set Paragraph Formatting", "Home › Paragraph › Paragraph", set_props).params(
+            r#"{"props": ParaProps, "onPage"?: {"align"?: "left|center|right|justify|distribute", "left"?: pt, "right"?: pt} (alignment and indents as seen on the page: each paragraph's own direction, after `props`, says which edge is its start)}"#,
+        ),
         CommandSpec::new("para.dialog", "Paragraph Settings", "Home › Paragraph", |s, _| {
             s.ui_requests.push(json!({"open": "paragraph"}));
             sel_result(s)
@@ -197,7 +234,8 @@ pub fn specs() -> Vec<CommandSpec> {
         .pure(),
         CommandSpec::new("styles.apply", "Apply Styles", "Home › Styles", apply_styles)
             .params(r#"{"style"?: string (name or id)}"#)
-            .key("Mod+Shift+S")
+            // On macOS ⌘⇧S is Save As, as in Word for Mac.
+            .key(super::non_mac("Mod+Shift+S"))
             .pure(),
         CommandSpec::new("styles.addToGallery", "Add to Style Gallery", "Home › Styles", |s, v| {
             let id = style_id(s, p::req_str(v, "style")?)?;
@@ -212,13 +250,27 @@ pub fn specs() -> Vec<CommandSpec> {
 
 /// Resolved paragraph props at the caret.
 fn cur(s: &Session) -> wordcraft_doc::resolve::ResolvedPara {
-    let props = s.doc.para_at(&s.sel.focus).map(|p| p.props.clone()).unwrap_or_default();
+    // A selection ending at the next paragraph's start doesn't format that paragraph (#418), so
+    // its state comes from the last paragraph it does cover.
+    let (a, b) = s.sel.ordered();
+    let mut at = s.sel.focus.clone();
+    if let Some(last) = s.doc.para_paths_in(&a, &b).pop()
+        && last != at.path
+        && at == b
+    {
+        at = Pos { path: last, off: 0, ..at };
+    }
+    let props = s.doc.para_at(&at).map(|p| p.props.clone()).unwrap_or_default();
     s.doc.styles.resolve_para(&props)
 }
 
 pub fn fmt(s: &mut Session, f: &dyn Fn(&mut ParaProps)) -> CmdResult {
-    let (a, b) = s.sel.ordered();
-    s.doc.format_paragraphs(&a, &b, f)?;
+    let story = s.sel.focus.story;
+    for path in super::selected_paths(s) {
+        let para = s.doc.para_mut(story, &path)?;
+        f(&mut para.props);
+        para.touch();
+    }
     sel_result(s)
 }
 
@@ -297,9 +349,47 @@ fn asian_typography(s: &mut Session, v: &Value) -> CmdResult {
     Ok(out)
 }
 
+/// Set Paragraph Formatting, the Paragraph dialog's OK as one undo step (#1346): `props` on
+/// every selected paragraph, then `onPage`'s alignment and indents as seen on the page, each
+/// paragraph's own direction (once `props` is applied) saying which edge is its start.
+fn set_props(s: &mut Session, v: &Value) -> CmdResult {
+    let props: ParaProps = serde_json::from_value(v.get("props").cloned().unwrap_or(Value::Null)).map_err(|e| CmdError::Params(e.to_string()))?;
+    let page = v.get("onPage").cloned().unwrap_or(Value::Null);
+    let align = match p::str(&page, "align") {
+        None => None,
+        Some("left") => Some(Align::Left),
+        Some("center") => Some(Align::Center),
+        Some("right") => Some(Align::Right),
+        Some("justify" | "both") => Some(Align::Justify),
+        Some("distribute") => Some(Align::Distribute),
+        Some(x) => return Err(CmdError::Params(format!("unknown alignment `{x}`"))),
+    };
+    let indent = |k: &str| p::f32(&page, k).map(|x| x.clamp(-1584.0, 1584.0));
+    let (left, right) = (indent("left"), indent("right"));
+    let story = s.sel.focus.story;
+    for path in super::selected_paths(s) {
+        let Some(para) = s.doc.para(story, &path) else { continue };
+        let rtl = s.doc.styles.resolve_para(&para.props.clone().overlaid(&props)).bidi;
+        let para = s.doc.para_mut(story, &path)?;
+        para.props.overlay(&props);
+        if let Some(a) = align {
+            para.props.align = Some(a.visual(rtl));
+        }
+        let (start, end) = if rtl { (right, left) } else { (left, right) };
+        if let Some(x) = start {
+            para.props.indent_left = Some(x);
+        }
+        if let Some(x) = end {
+            para.props.indent_right = Some(x);
+        }
+        para.touch();
+    }
+    sel_result(s)
+}
+
 pub fn indent(s: &mut Session, _: &Value) -> CmdResult {
-    let (a, b) = s.sel.ordered();
-    let paths = s.doc.paths_between(&a, &b);
+    let a = s.sel.ordered().0;
+    let paths = super::selected_paths(s);
     let tab = s.doc.settings.default_tab.max(1.0);
     for path in paths {
         let (num, left) = {
@@ -309,7 +399,10 @@ pub fn indent(s: &mut Session, _: &Value) -> CmdResult {
         let para = s.doc.para_mut(a.story, &path)?;
         match num {
             Some(n) => para.props.numbering = Some(NumRef { num: n.num, level: (n.level + 1).min(8) }),
-            None => para.props.indent_left = Some(((left / tab).floor() + 1.0) * tab),
+            None => {
+                para.props.indent_left = Some(((left / tab).floor() + 1.0) * tab);
+                para.props.cancel_char_indents(true, false, false);
+            }
         }
         para.touch();
     }
@@ -317,8 +410,8 @@ pub fn indent(s: &mut Session, _: &Value) -> CmdResult {
 }
 
 pub fn outdent(s: &mut Session, _: &Value) -> CmdResult {
-    let (a, b) = s.sel.ordered();
-    let paths = s.doc.paths_between(&a, &b);
+    let a = s.sel.ordered().0;
+    let paths = super::selected_paths(s);
     let tab = s.doc.settings.default_tab.max(1.0);
     for path in paths {
         let (num, left) = {
@@ -328,7 +421,10 @@ pub fn outdent(s: &mut Session, _: &Value) -> CmdResult {
         let para = s.doc.para_mut(a.story, &path)?;
         match num {
             Some(n) => para.props.numbering = Some(NumRef { num: n.num, level: n.level.saturating_sub(1) }),
-            None => para.props.indent_left = Some((((left / tab).ceil() - 1.0) * tab).max(0.0)),
+            None => {
+                para.props.indent_left = Some((((left / tab).ceil() - 1.0) * tab).max(0.0));
+                para.props.cancel_char_indents(true, false, false);
+            }
         }
         para.touch();
     }
@@ -377,10 +473,13 @@ fn apply_style(s: &mut Session, v: &Value) -> CmdResult {
         return super::format::apply(s, &|c| c.style = Some(id.clone()));
     }
     let (a, b) = s.sel.ordered();
-    s.doc.format_paragraphs(&a, &b, &|p| {
+    // A style linked to a list level (a heading in a numbered-headings list) brings its number.
+    let numbered = s.doc.styles.resolve_para(&ParaProps { style: Some(id.clone()), ..Default::default() }).numbering.is_some();
+    fmt(s, &|p| {
         p.style = Some(id.clone());
-        // Applying a heading or Normal removes direct list numbering (except list styles).
-        if (id.starts_with("Heading") || id == "Title" || id == "Normal") && p.numbering.is_some_and(|n| n.num != 0) {
+        // Applying a heading or Normal removes direct list numbering (except list styles); a
+        // numbered style's own number replaces any direct numbering, even numbering switched off.
+        if numbered || ((id.starts_with("Heading") || id == "Title" || id == "Normal") && p.numbering.is_some_and(|n| n.num != 0)) {
             p.numbering = None;
         }
     })?;
@@ -394,12 +493,14 @@ fn apply_style(s: &mut Session, v: &Value) -> CmdResult {
             para.format(0, len, &|c| {
                 c.font = None;
                 c.font_cs = None;
+                c.font_ea = None;
                 c.size = None;
                 c.size_cs = None;
                 c.color = None;
             })?;
             para.mark.font = None;
             para.mark.font_cs = None;
+            para.mark.font_ea = None;
             para.mark.size = None;
             para.mark.size_cs = None;
             para.mark.color = None;
@@ -412,10 +513,10 @@ fn apply_style(s: &mut Session, v: &Value) -> CmdResult {
 fn list(s: &mut Session, v: &Value, default: ListKind) -> CmdResult {
     let kind = p::str(v, "kind").and_then(ListKind::parse).unwrap_or(default);
     let off = p::bool(v, "off").unwrap_or(false);
-    let (a, b) = s.sel.ordered();
+    let a = s.sel.ordered().0;
     // Toggle: if every selected paragraph already has this kind of list, remove it.
     let current: Vec<Option<NumRef>> =
-        s.doc.paths_between(&a, &b).iter().map(|p| s.doc.para(a.story, p).and_then(|x| x.props.numbering).filter(|n| n.num != 0)).collect();
+        super::selected_paths(s).iter().map(|p| s.doc.para(a.story, p).and_then(|x| x.props.numbering).filter(|n| n.num != 0)).collect();
     let same_kind = |n: &NumRef| {
         s.doc.numbering.level(n.num, 0).is_some_and(|l| {
             let want = wordcraft_doc::numbering::levels_for(kind);
@@ -431,6 +532,8 @@ fn list(s: &mut Session, v: &Value, default: ListKind) -> CmdResult {
             p.numbering = Some(NumRef { num: 0, level: 0 });
             p.indent_left = None;
             p.indent_first = None;
+            p.indent_left_chars = None;
+            p.indent_first_chars = None;
             if p.style.as_deref() == Some("ListParagraph") {
                 p.style = None;
             }
@@ -445,8 +548,11 @@ fn list(s: &mut Session, v: &Value, default: ListKind) -> CmdResult {
     let num = match prev_num {
         Some(n) => n.num,
         None => match kind {
-            ListKind::Bullet | ListKind::BulletChar(_) => s.doc.numbering.find_kind(kind).unwrap_or_else(|| s.doc.numbering.add_list(kind)),
-            _ => s.doc.numbering.add_list(kind),
+            ListKind::Bullet | ListKind::BulletChar(_) => match s.doc.numbering.find_kind(kind) {
+                Some(n) => n,
+                None => s.doc.numbering.try_add_list(kind)?,
+            },
+            _ => s.doc.numbering.try_add_list(kind)?,
         },
     };
     fmt(s, &|p| {
@@ -454,6 +560,8 @@ fn list(s: &mut Session, v: &Value, default: ListKind) -> CmdResult {
         p.numbering = Some(NumRef { num, level });
         p.indent_left = None;
         p.indent_first = None;
+        p.indent_left_chars = None;
+        p.indent_first_chars = None;
         if p.style.is_none() || p.style.as_deref() == Some("Normal") {
             p.style = Some("ListParagraph".into());
         }
@@ -522,7 +630,7 @@ fn tabs(s: &mut Session, v: &Value) -> CmdResult {
         return sel_result(s);
     }
     let styles = s.doc.styles.clone();
-    let near = |a: f32, b: f32| (a - b).abs() < 0.5;
+    let near = |a: f32, b: f32| (a - b).abs() < wordcraft_doc::props::TAB_POS_EPS;
     fmt(s, &|p| {
         // The stops the paragraph inherits from its style.
         let inherited = styles.resolve_para(&ParaProps { tabs: None, ..p.clone() }).tabs;
@@ -578,6 +686,10 @@ pub fn border_sides(v: &Value, space_tb: f32, space_lr: f32) -> Result<Borders, 
 /// selected paragraph includes its mark). Refused at the top or bottom of the container, next to
 /// a table, across a section break and for a selection across table cells.
 fn move_paras(s: &mut Session, up: bool) -> CmdResult {
+    // Outline view: what's collapsed moves with its heading, past whole shown paragraphs.
+    if let Some(r) = super::outline::move_shown(s, up) {
+        return r;
+    }
     let (a, b) = s.sel.ordered();
     if a.story != b.story || a.path.parent() != b.path.parent() {
         return Err(CmdError::Failed("select paragraphs in one place (not across table cells) to move them".into()));
@@ -641,9 +753,20 @@ fn heading_level(s: &Session, props: &ParaProps) -> Option<u8> {
     s.doc.styles.resolve_para(props).outline_level.filter(|l| *l < 9).map(|l| l + 1)
 }
 
+/// Give paragraph `path` Heading `level` (1–9), or make it body text (`None`: the default
+/// paragraph style); its own outline level goes, so the style's counts.
+pub(crate) fn set_heading(s: &mut Session, story: wordcraft_doc::StoryRef, path: &wordcraft_doc::Path, level: Option<u8>) -> Result<(), CmdError> {
+    let style = level.map(|n| ensure_heading_style(s, n.clamp(1, 9)));
+    let para = s.doc.para_mut(story, path)?;
+    para.props.style = style;
+    para.props.outline_level = None;
+    para.touch();
+    Ok(())
+}
+
 /// Make sure the built-in `Heading{n}` style (and its linked character style) is in the
 /// document, for files that didn't bring it.
-fn ensure_heading_style(s: &mut Session, n: u8) -> String {
+pub(crate) fn ensure_heading_style(s: &mut Session, n: u8) -> String {
     let id = format!("Heading{n}");
     if s.doc.styles.get(&id).is_none() {
         let builtin = wordcraft_doc::styles::StyleSheet::builtin();
@@ -664,6 +787,8 @@ fn ensure_heading_style(s: &mut Session, n: u8) -> String {
 /// promoted becomes a heading at the level of the heading before it (Heading 1 when there is
 /// none) and can't be demoted further; a list item changes list level like Shift+Tab / Tab.
 fn outline_step(s: &mut Session, promote: bool) -> CmdResult {
+    // Outline view: the headings hidden under a collapsed heading move a level with it.
+    let carried = super::outline::hidden_subheadings(s);
     let (a, b) = s.sel.ordered();
     let paths = s.doc.paths_between(&a, &b);
     // The heading before the selection, for promoted body text.
@@ -705,6 +830,12 @@ fn outline_step(s: &mut Session, promote: bool) -> CmdResult {
     }
     if !changed {
         return Err(CmdError::Failed(if promote { "nothing to promote".into() } else { "nothing to demote".into() }));
+    }
+    for (j, h) in carried {
+        let n = if promote { h.saturating_sub(1).max(1) } else { (h + 1).min(9) };
+        if n != h {
+            set_heading(s, wordcraft_doc::StoryRef::Body, &wordcraft_doc::Path::top(j), Some(n))?;
+        }
     }
     sel_result(s)
 }
@@ -754,28 +885,42 @@ fn sort(s: &mut Session, v: &Value) -> CmdResult {
         return Err(CmdError::Failed("select paragraphs in one place to sort".into()));
     }
     let (i0, i1) = (a.path.last(), b.path.last());
+    let lang = s.doc.para(a.story, &a.path).and_then(|p| super::para_lang(&s.doc, p)).or_else(|| super::default_lang(s));
     let bl = s.doc.container_mut(a.story, &a.path)?;
     let Some(slice) = bl.get_mut(i0..=i1) else { return Err(CmdError::Failed("bad range".into())) };
     if slice.iter().any(|b| !matches!(**b, Block::Para(_))) {
         return Err(CmdError::Failed("sorting tables isn't supported here; use Table › Sort".into()));
     }
-    let key = |b: &std::sync::Arc<Block>| b.as_para().map(|p| p.plain_text().to_lowercase()).unwrap_or_default();
-    slice.sort_by(|x, y| {
-        let o = natural_cmp(&key(x), &key(y));
+    let mut keyed: Vec<_> =
+        slice.iter().map(|b| (natural_key(&b.as_para().map(|p| p.plain_text()).unwrap_or_default(), lang.as_deref()), b.clone())).collect();
+    keyed.sort_by(|(x, _), (y, _)| {
+        let o = natural_cmp(x, y);
         if desc { o.reverse() } else { o }
     });
+    for (dst, (_, blk)) in slice.iter_mut().zip(keyed) {
+        *dst = blk;
+    }
     // Keep a section break on the last paragraph of the range where it was.
     s.sel = crate::Selection { anchor: Pos { off: 0, ..a }, focus: b };
     sel_result(s)
 }
 
-/// Compare strings with embedded numbers numerically ("item 2" < "item 10").
-fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
-    let num = |s: &str| s.trim().split(|c: char| !c.is_ascii_digit()).next().and_then(|n| n.parse::<f64>().ok());
-    match (num(a), num(b)) {
-        (Some(x), Some(y)) if x != y => x.total_cmp(&y),
-        _ => a.cmp(b),
-    }
+/// A paragraph's sort key: the number it starts with, then its text in its language's order.
+fn natural_key(text: &str, lang: Option<&str>) -> (Option<f64>, SortKey) {
+    let num = text.trim().split(|c: char| !c.is_ascii_digit()).next().and_then(|n| n.parse::<f64>().ok());
+    (num, sort_key(text, lang))
+}
+
+/// Paragraphs starting with a number come first, in numeric order ("item 2" < "item 10" within
+/// the same number, by text); the rest follow in collation order. A total order.
+fn natural_cmp(a: &(Option<f64>, SortKey), b: &(Option<f64>, SortKey)) -> std::cmp::Ordering {
+    let num = match (a.0, b.0) {
+        (Some(x), Some(y)) => x.total_cmp(&y),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    };
+    num.then_with(|| a.1.cmp(&b.1))
 }
 
 fn create_style(s: &mut Session, v: &Value) -> CmdResult {
@@ -804,7 +949,8 @@ fn create_style(s: &mut Session, v: &Value) -> CmdResult {
         st.para = para.props.clone();
         st.para.style = None;
         st.para.numbering = None;
-        st.chr = para.props_at(s.sel.focus.off).clone();
+        // A symbol's own font is the symbol's, not the style's.
+        st.chr = para.props_at(s.sel.focus.off).clone().without_symbol();
         st.chr.style = None;
         st.chr.link = None;
         st.chr.ins = None;
@@ -819,8 +965,7 @@ fn create_style(s: &mut Session, v: &Value) -> CmdResult {
 
 fn modify_style(s: &mut Session, v: &Value) -> CmdResult {
     let id = style_id(s, p::req_str(v, "style")?)?;
-    let chr: Option<wordcraft_doc::CharProps> =
-        v.get("chr").map(|c| serde_json::from_value(c.clone())).transpose().map_err(|e| CmdError::Params(e.to_string()))?;
+    let chr: Option<CharProps> = v.get("chr").map(|c| serde_json::from_value(c.clone())).transpose().map_err(|e| CmdError::Params(e.to_string()))?;
     let para: Option<ParaProps> =
         v.get("para").map(|c| serde_json::from_value(c.clone())).transpose().map_err(|e| CmdError::Params(e.to_string()))?;
     let next = p::str(v, "next").map(str::to_string);
@@ -843,34 +988,107 @@ fn modify_style(s: &mut Session, v: &Value) -> CmdResult {
     sel_result(s)
 }
 
+/// Update Style to Match Selection: the style takes on how the selection looks — its paragraph
+/// style, character style and direct formatting, read at the start of the selection — so every
+/// paragraph using the style changes. A paragraph style is then applied to the selected
+/// paragraphs, whose direct formatting the style now carries is dropped (other direct formatting,
+/// a bold word say, stays). The style keeps its outline level and list numbering.
 fn update_to_match(s: &mut Session, v: &Value) -> CmdResult {
-    let f = s.sel.focus.clone();
-    let Some(para) = s.doc.para_at(&f).cloned() else { return sel_result(s) };
+    let (a, b) = s.sel.ordered();
+    let Some(para) = s.doc.para_at(&a).cloned() else { return sel_result(s) };
     let id = match p::str(v, "style") {
         Some(n) => style_id(s, n)?,
         None => para.props.style.clone().unwrap_or_else(|| "Normal".into()),
     };
-    let mut chr = para.props_at(f.off).clone();
-    chr.style = None;
-    chr.link = None;
-    chr.ins = None;
-    chr.del = None;
-    chr.fmt_change = None;
-    let mut pp = para.props.formatting();
-    pp.style = None;
-    pp.numbering = None;
-    if let Some(st) = s.doc.styles.get_mut(&id) {
-        st.chr.overlay(&chr);
-        st.para.overlay(&pp);
+    let sheet = &s.doc.styles;
+    let Some(target) = sheet.get(&id).cloned() else { return Err(CmdError::Params(format!("no style `{id}`"))) };
+    if !matches!(target.kind, StyleKind::Paragraph | StyleKind::Character) {
+        return Err(CmdError::Failed(format!("`{}` can't be updated to match the selection", target.name)));
     }
-    // Remove the now-redundant direct formatting from the paragraph.
-    let p = s.doc.para_mut(f.story, &f.path)?;
-    let len = p.len();
-    p.format(0, len, &|c| *c = c.cleared())?;
-    let style = p.props.style.clone();
-    p.props = ParaProps { style, numbering: p.props.numbering, ..Default::default() };
+    // A symbol's own font is the symbol's, not the style's.
+    let direct = if s.sel.is_collapsed() { para.props_at(a.off) } else { para.props_of_char(a.off) }.clone().without_symbol();
+    let para_style = para.props.style.clone().unwrap_or_else(|| "Normal".into());
+    // How the selection looks: document defaults, its paragraph style chain, its character
+    // style chain, direct formatting (the resolve order, before defaults are filled in).
+    let (mut want_p, mut want_c) = sheet.para_style_props(&para_style);
+    let char_chain = |c: &mut CharProps, style: Option<&str>| {
+        for st in style.map(|cs| sheet.chain(cs)).unwrap_or_default() {
+            if matches!(st.kind, StyleKind::Character | StyleKind::Paragraph) {
+                c.overlay(&st.chr);
+            }
+        }
+    };
+    char_chain(&mut want_c, direct.style.as_deref());
+    want_c.overlay(&CharProps { style: None, ..direct.formatting() });
+    want_p.overlay(&ParaProps { style: None, numbering: None, ..para.props.formatting() });
+    // How the style looks now, in the same terms.
+    let (have_p, have_c) = match target.kind {
+        StyleKind::Character => {
+            let (pp, mut cc) = sheet.para_style_props(&para_style);
+            char_chain(&mut cc, Some(&id));
+            (pp, cc)
+        }
+        _ => sheet.para_style_props(&id),
+    };
+    let chr = retarget(&target.chr, &have_c, &want_c, CHAR_KEEP)?;
+    let pp = if target.kind == StyleKind::Paragraph { retarget(&target.para, &have_p, &want_p, PARA_KEEP)? } else { target.para.clone() };
+    if let Some(st) = s.doc.styles.get_mut(&id) {
+        st.chr = chr;
+        st.para = pp;
+    }
+    if target.kind == StyleKind::Paragraph {
+        // The selected paragraphs take the style; what it now gives them needn't stay direct.
+        let paths = s.doc.paths_between(&a, &b);
+        for path in paths {
+            let p = s.doc.para_mut(a.story, &path)?;
+            p.props.style = Some(id.clone());
+            p.props = strip_matching(&p.props, &want_p, PARA_KEEP);
+            let len = p.len();
+            p.format(0, len, &|c| *c = strip_matching(c, &want_c, CHAR_KEEP))?;
+            p.mark = strip_matching(&p.mark, &want_c, CHAR_KEEP);
+        }
+    }
+    s.pending = None;
     touch_all(s);
     sel_result(s)
+}
+
+/// Character properties Update to Match leaves alone: the character style, links and revisions.
+const CHAR_KEEP: &[&str] = &["style", "link", "ins", "del", "fmtChange"];
+/// Paragraph properties Update to Match leaves alone: the style, its outline level (a heading
+/// stays a heading), list numbering and revisions.
+const PARA_KEEP: &[&str] = &["style", "outlineLevel", "numbering", "numChange", "fmtChange"];
+
+fn props_map<T: serde::Serialize>(t: &T) -> serde_json::Map<String, Value> {
+    match serde_json::to_value(t) {
+        Ok(Value::Object(m)) => m,
+        _ => serde_json::Map::new(),
+    }
+}
+
+/// A style's own properties `own`, changed so that its chain gives `want` where it gave `have`:
+/// a property that differs is set to the wanted value, or dropped (inherited again) when the
+/// selection doesn't set it at all.
+fn retarget<T: serde::Serialize + serde::de::DeserializeOwned>(own: &T, have: &T, want: &T, keep: &[&str]) -> Result<T, CmdError> {
+    let (mut out, have, want) = (props_map(own), props_map(have), props_map(want));
+    let keys: std::collections::BTreeSet<&String> = have.keys().chain(want.keys()).collect();
+    for k in keys {
+        if keep.contains(&k.as_str()) || have.get(k) == want.get(k) {
+            continue;
+        }
+        match want.get(k) {
+            Some(v) => out.insert(k.clone(), v.clone()),
+            None => out.remove(k),
+        };
+    }
+    serde_json::from_value(Value::Object(out)).map_err(|e| CmdError::Failed(e.to_string()))
+}
+
+/// `direct` without the properties that have the same value in `inherited` (outside `keep`).
+fn strip_matching<T: serde::Serialize + serde::de::DeserializeOwned + Clone>(direct: &T, inherited: &T, keep: &[&str]) -> T {
+    let (mut out, inherited) = (props_map(direct), props_map(inherited));
+    out.retain(|k, v| keep.contains(&k.as_str()) || inherited.get(k) != Some(v));
+    serde_json::from_value(Value::Object(out)).unwrap_or_else(|_| direct.clone())
 }
 
 /// Delete a custom style. Text that uses it falls back to the style it was based on (or the
@@ -1026,4 +1244,30 @@ fn own_format(st: &Style) -> Value {
 /// nothing needs touching here (kept as the one place to hook style-change side effects).
 pub fn touch_all(s: &mut Session) {
     s.dirty = true;
+}
+
+/// Which Home › Paragraph list buttons show as on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ListButtons {
+    pub bullets: bool,
+    pub numbering: bool,
+    pub multilevel: bool,
+}
+
+/// The list buttons for a paragraph with resolved `numbering` (the ribbon passes the paragraph
+/// props it already resolved). The paragraph's own level decides Bullets (a bulleted level) or
+/// Numbering (a numbered one); Multilevel is on too when the list numbers its levels together:
+/// some level's label shows another level's number (`1.1.`) or uses legal numbering.
+pub fn list_buttons(doc: &wordcraft_doc::Document, numbering: Option<NumRef>) -> ListButtons {
+    let Some(n) = numbering.filter(|n| n.num != 0) else { return ListButtons::default() };
+    let Some(level) = doc.numbering.level(n.num, n.level) else { return ListButtons::default() };
+    let bullets = level.format == wordcraft_doc::section::NumFormat::Bullet;
+    let joined = |i: u8| {
+        doc.numbering.level(n.num, i).is_some_and(|l| {
+            let own = u32::from(i) + 1;
+            l.legal || l.text.split('%').skip(1).filter_map(|t| t.chars().next()?.to_digit(10)).any(|k| k != own)
+        })
+    };
+    let multilevel = (0..9u8).any(joined);
+    ListButtons { bullets, numbering: !bullets, multilevel }
 }

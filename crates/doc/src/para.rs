@@ -208,6 +208,49 @@ pub struct Float {
     /// (unrotated) frame; `None` = derived from the object (see [`crate::wrap`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wrap_polygon: Option<std::sync::Arc<crate::wrap::WrapPolygon>>,
+    /// What the drawing is, for screen readers and exports (`wp:docPr` `@descr`, `@title` and the
+    /// decorative mark). See [`InlineObject::alt_text`].
+    #[serde(skip_serializing_if = "AltText::is_empty")]
+    pub alt: AltText,
+    /// Hidden (`wp:docPr/@hidden`, VML `visibility:hidden`): kept and saved, but neither drawn nor
+    /// laid out, as Word for Windows does (Word for Mac draws hidden VML shapes).
+    #[serde(skip_serializing_if = "is_false")]
+    pub hidden: bool,
+    /// Anchored in a table cell but placed on the page, not in the cell (`wp:anchor/@layoutInCell`
+    /// off, any VML shape in a header or footer): a picture watermark in a header that starts with a table.
+    #[serde(skip_serializing_if = "is_false")]
+    pub outside_cell: bool,
+}
+
+/// Longest alternative text kept (characters): hostile files and commands are capped.
+pub const MAX_ALT_TEXT: usize = 10_000;
+
+/// A drawing's alternative text (Picture/Shape Format › Accessibility › Alt Text).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+pub struct AltText {
+    /// The description of a shape, text box or group. Pictures and charts keep theirs in their
+    /// own `alt`; read it with [`InlineObject::alt_text`], which knows where it is.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub text: String,
+    /// The short title (`wp:docPr/@title`).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub title: String,
+    /// Decorative: it adds nothing to the content, so screen readers skip it and the
+    /// accessibility checker doesn't ask for a description.
+    #[serde(skip_serializing_if = "is_false")]
+    pub decorative: bool,
+}
+
+impl AltText {
+    pub fn is_empty(&self) -> bool {
+        self.text.is_empty() && self.title.is_empty() && !self.decorative
+    }
+}
+
+/// `s` cut to [`MAX_ALT_TEXT`] characters.
+pub fn cap_alt(s: &str) -> String {
+    s.chars().take(MAX_ALT_TEXT).collect()
 }
 
 fn is_zero(v: &f32) -> bool {
@@ -249,7 +292,11 @@ pub enum ShapeKind {
     Rectangle,
     RoundedRectangle,
     Ellipse,
+    /// Flowchart OR preset: an ellipse with horizontal and vertical spokes.
+    FlowchartOr,
     Triangle,
+    /// A right triangle (DrawingML's `rtTriangle`): the right angle at the bottom left.
+    RightTriangle,
     Diamond,
     Line,
     Arrow,
@@ -259,6 +306,10 @@ pub enum ShapeKind {
     TextBox,
     /// A shape drawn point by point, such as ink (its geometry is the shape's `freeform`).
     Freeform,
+    /// Connectors: lines whose ends can be glued to other shapes (see [`crate::connector`]).
+    StraightConnector,
+    ElbowConnector,
+    CurvedConnector,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
@@ -267,6 +318,60 @@ pub enum NoteKind {
     #[default]
     Footnote,
     Endnote,
+}
+
+/// Where a positional tab ([`InlineObject::PositionalTab`]) lands on its line, and how the text
+/// after it lines up there (ECMA-376 `ST_PTabAlignment`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum PTabAlign {
+    #[default]
+    Left,
+    Center,
+    Right,
+}
+
+impl PTabAlign {
+    pub const ALL: [PTabAlign; 3] = [PTabAlign::Left, PTabAlign::Center, PTabAlign::Right];
+
+    /// The OOXML name (`left`, `center`, `right`).
+    pub fn ooxml(self) -> &'static str {
+        match self {
+            PTabAlign::Left => "left",
+            PTabAlign::Center => "center",
+            PTabAlign::Right => "right",
+        }
+    }
+
+    pub fn from_ooxml(v: &str) -> Option<PTabAlign> {
+        PTabAlign::ALL.into_iter().find(|a| a.ooxml() == v)
+    }
+}
+
+/// What a positional tab's place is measured against (ECMA-376 `ST_PTabRelativeTo`): the text
+/// margins, or the paragraph's indents.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum PTabBase {
+    #[default]
+    Margin,
+    Indent,
+}
+
+impl PTabBase {
+    pub const ALL: [PTabBase; 2] = [PTabBase::Margin, PTabBase::Indent];
+
+    /// The OOXML name (`margin`, `indent`).
+    pub fn ooxml(self) -> &'static str {
+        match self {
+            PTabBase::Margin => "margin",
+            PTabBase::Indent => "indent",
+        }
+    }
+
+    pub fn from_ooxml(v: &str) -> Option<PTabBase> {
+        PTabBase::ALL.into_iter().find(|a| a.ooxml() == v)
+    }
 }
 
 /// How ruby (phonetic guide) text lines up over its base text (ECMA-376 `ST_RubyAlign`).
@@ -337,7 +442,7 @@ pub enum InlineObject {
         crop: [f32; 4],
         /// The OLE object (embedded or linked file) this picture shows, as read from a file:
         /// saving writes the object back, not only its picture. See [`crate::graphic::Embedded`].
-        #[serde(skip)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         ole: Option<std::sync::Arc<crate::graphic::Embedded>>,
     },
     /// A chart or SmartArt diagram (see [`crate::graphic`]).
@@ -369,6 +474,9 @@ pub enum InlineObject {
         /// Shadow, glow and soft edges.
         #[serde(default, skip_serializing_if = "crate::effects::ShapeEffects::is_empty")]
         effects: crate::effects::ShapeEffects,
+        /// Drawing id, text warp, connector ends and arrowheads.
+        #[serde(default, skip_serializing_if = "crate::connector::ShapeExtra::is_empty")]
+        extra: crate::connector::ShapeExtra,
     },
     /// Pictures, shapes and text boxes grouped into one object (Layout › Arrange › Group): it
     /// moves, wraps and resizes as one. Its members are laid out in the group's own coordinate
@@ -398,23 +506,42 @@ pub enum InlineObject {
         result: String,
         #[serde(default)]
         locked: bool,
+        /// `w:dirty` (ECMA-376 §17.16.5.35): the cached result is stale — another program that
+        /// couldn't compute it set the flag so Word refreshes the field on open. Kept through
+        /// saves; cleared when WordCraft computes a result, like Word's F9.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        dirty: bool,
         /// Shows its code (`{ PAGE }`) instead of its result, the other way round from the
         /// document-wide View › Field Codes setting (`fields.toggleCode`, Shift+F9). A view
         /// toggle: never written to files.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         code: bool,
+        /// A legacy form field's definition (`FORMCHECKBOX`, `FORMTEXT`, `FORMDROPDOWN`): the
+        /// source's `w:ffData`, raw OOXML kept for round trip. Empty for other fields.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        form: String,
     },
     /// The start of a field whose result is ordinary content — formatted, possibly spanning
-    /// paragraphs — up to the matching [`InlineObject::FieldEnd`]. Citation managers' `ADDIN`
-    /// fields (Zotero, Mendeley, EndNote) are kept this way; `instr` is the field code. See
+    /// paragraphs — up to the matching [`InlineObject::FieldEnd`]. Imported TOCs and citation
+    /// managers' `ADDIN` fields are kept this way; `instr` is the field code. See
     /// [`crate::fields`].
     FieldStart {
         instr: String,
         #[serde(default)]
         locked: bool,
+        /// `w:dirty` on the begin marker, as [`InlineObject::Field::dirty`].
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        dirty: bool,
     },
     /// The end of the innermost open [`InlineObject::FieldStart`].
     FieldEnd,
+    /// The start of a content control whose content is what follows, up to the matching
+    /// [`InlineObject::ControlEnd`]. See [`crate::control`].
+    ControlStart {
+        control: Box<crate::control::ContentControl>,
+    },
+    /// The end of the innermost open [`InlineObject::ControlStart`].
+    ControlEnd,
     NoteRef {
         kind: NoteKind,
         /// `Document::parts` id of the note's story.
@@ -433,6 +560,20 @@ pub enum InlineObject {
         id: u32,
     },
     CommentEnd {
+        id: u32,
+    },
+    /// The start of a range that stays editable while the document is protected (Restrict
+    /// Editing exceptions, `w:permStart`): for everyone (`group` = `everyone`), another editing
+    /// group, or one editor (`editor`, a user name or address).
+    PermStart {
+        id: u32,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        group: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        editor: String,
+    },
+    /// The end of the editable range [`InlineObject::PermStart`] with the same `id` opened.
+    PermEnd {
         id: u32,
     },
     /// An equation: its linear format (`x=(-b±√(b^2-4ac))/2a`, for plain text) and structure.
@@ -465,6 +606,17 @@ pub enum InlineObject {
         /// Formatting of the ruby text over the run's (font, colour…); its size is `size`.
         #[serde(default, skip_serializing_if = "CharProps::is_empty")]
         props: Box<CharProps>,
+    },
+    /// A positional tab (Word's alignment tab, `w:ptab`): it goes to the left edge, centre or
+    /// right edge of the margins or of the indents, whatever the paragraph's tab stops, and the
+    /// text after it lines up there. Text already past that place sends it to the next line.
+    PositionalTab {
+        #[serde(default)]
+        align: PTabAlign,
+        #[serde(default)]
+        relative_to: PTabBase,
+        #[serde(default)]
+        leader: crate::props::TabLeader,
     },
     /// Something we don't model, kept for round-trip (raw XML of the source format).
     Opaque {
@@ -595,6 +747,14 @@ impl InlineObject {
             })
             .collect()
     }
+    /// A legacy form field's definition (`FORMCHECKBOX`, `FORMTEXT`, `FORMDROPDOWN`), read from
+    /// the `w:ffData` it keeps; `None` for anything else.
+    pub fn legacy_form(&self) -> Option<crate::legacy_form::LegacyForm> {
+        match self {
+            InlineObject::Field { form, .. } if !form.is_empty() => crate::legacy_form::LegacyForm::parse(form),
+            _ => None,
+        }
+    }
     /// Zero-width markers don't take part in layout.
     pub fn is_marker(&self) -> bool {
         matches!(
@@ -603,9 +763,35 @@ impl InlineObject {
                 | InlineObject::BookmarkEnd { .. }
                 | InlineObject::CommentStart { .. }
                 | InlineObject::CommentEnd { .. }
+                | InlineObject::PermStart { .. }
+                | InlineObject::PermEnd { .. }
                 | InlineObject::FieldStart { .. }
                 | InlineObject::FieldEnd
+                | InlineObject::ControlStart { .. }
+                | InlineObject::ControlEnd
         )
+    }
+    /// A drawing's description (alternative text), wherever it is kept.
+    pub fn alt_text(&self) -> &str {
+        match self {
+            InlineObject::Image { alt, .. } | InlineObject::Graphic { alt, .. } => alt,
+            InlineObject::Shape { float, .. } | InlineObject::Group { float, .. } => &float.alt.text,
+            _ => "",
+        }
+    }
+    /// Set a drawing's description (capped at [`MAX_ALT_TEXT`] characters); `false` if this is no drawing.
+    pub fn set_alt_text(&mut self, text: &str) -> bool {
+        let text = cap_alt(text);
+        match self {
+            InlineObject::Image { alt, .. } | InlineObject::Graphic { alt, .. } => *alt = text,
+            InlineObject::Shape { float, .. } | InlineObject::Group { float, .. } => float.alt.text = text,
+            _ => return false,
+        }
+        true
+    }
+    /// A drawing marked decorative.
+    pub fn is_decorative(&self) -> bool {
+        self.frame().is_some_and(|(_, _, f)| f.alt.decorative)
     }
     pub fn is_floating(&self) -> bool {
         match self {
@@ -647,6 +833,7 @@ impl InlineObject {
             InlineObject::Field { result, .. } => result,
             InlineObject::Equation { linear, .. } => linear,
             InlineObject::Ruby { base, .. } => base,
+            InlineObject::PositionalTab { .. } => "\t",
             InlineObject::Opaque { text, .. } => text,
             _ => "",
         }
@@ -739,6 +926,30 @@ impl Paragraph {
             } else {
                 out.push(c);
             }
+        }
+        out
+    }
+    /// [`Self::plain_text`] as it reads on screen: characters in runs set in a symbol font
+    /// (Symbol, Wingdings…) become their standard Unicode equivalents
+    /// ([`crate::symbol_fonts`]). For copying as text and plain-text export; the stored text is
+    /// unchanged.
+    pub fn shown_text(&self) -> String {
+        let mut out = String::with_capacity(self.text.len());
+        let mut k = 0;
+        let mut runs = self.run_ranges().peekable();
+        for (i, c) in self.text.char_indices() {
+            while runs.peek().is_some_and(|(r, _)| r.end <= i) {
+                runs.next();
+            }
+            if c == OBJ {
+                if let Some(o) = self.objects.get(k) {
+                    out.push_str(o.plain_text());
+                }
+                k += 1;
+                continue;
+            }
+            let font = runs.peek().filter(|(r, _)| r.contains(&i)).and_then(|(_, p)| p.shown_font());
+            out.push(font.and_then(|f| crate::symbol_fonts::symbol_char(f, c)).unwrap_or(c));
         }
         out
     }
@@ -912,32 +1123,32 @@ impl Paragraph {
 
     /// Merge adjacent equal runs and drop empty ones.
     pub fn normalize(&mut self) {
+        // Runs must end on character boundaries and cover the text exactly (never expected, but
+        // files lie): clamp each end to the text, push it past a split character, pad the tail.
+        let n = self.text.len();
+        let mut end = 0usize;
         let mut out: Vec<Run> = Vec::with_capacity(self.runs.len());
         for r in self.runs.drain(..) {
-            if r.len == 0 {
+            let mut e = end.saturating_add(r.len).min(n);
+            while !self.text.is_char_boundary(e) {
+                e += 1;
+            }
+            if e == end {
                 continue;
             }
             match out.last_mut() {
-                Some(l) if l.props == r.props => l.len += r.len,
-                _ => out.push(r),
+                Some(l) if l.props == r.props => l.len += e - end,
+                _ => out.push(Run { len: e - end, props: r.props }),
+            }
+            end = e;
+        }
+        if end < n {
+            match out.last_mut() {
+                Some(l) => l.len += n - end,
+                None => out.push(Run { len: n, props: self.mark.clone() }),
             }
         }
         self.runs = out;
-        // Repair a run list that doesn't cover the text exactly (never expected, but files lie).
-        let total: usize = self.runs.iter().map(|r| r.len).sum();
-        if total != self.text.len() {
-            if total < self.text.len() {
-                let p = self.runs.last().map(|r| r.props.clone()).unwrap_or_else(|| self.mark.clone());
-                self.runs.push(Run { len: self.text.len() - total, props: p });
-            } else {
-                let mut keep = self.text.len();
-                for r in &mut self.runs {
-                    r.len = r.len.min(keep);
-                    keep -= r.len;
-                }
-                self.runs.retain(|r| r.len > 0);
-            }
-        }
     }
 
     /// Delete `a..b` (bytes). Objects inside are removed.
@@ -951,7 +1162,12 @@ impl Paragraph {
         if self.runs.is_empty() || a == 0 {
             // Keep the formatting of what's deleted for the mark when emptying.
             if b == self.text.len() {
-                self.mark = self.props_of_char(a).clone();
+                // Formatting only: the mark is a tracked change of its own or it is not, whatever
+                // revision the deleted text was part of.
+                let revisions = (self.mark.ins, self.mark.del, self.mark.fmt_change.clone());
+                let mut mark = self.props_of_char(a).clone();
+                (mark.ins, mark.del, mark.fmt_change) = revisions;
+                self.mark = mark;
             }
         }
         let k0 = self.objects_before(a);
@@ -969,6 +1185,33 @@ impl Paragraph {
         }
         self.normalize();
         self.touch();
+        Ok(())
+    }
+
+    /// Delete `a..b` except the one-character objects at the offsets in `keep` (control
+    /// markers a deletion leaves in place).
+    pub fn delete_except(&mut self, a: usize, b: usize, keep: &[usize]) -> Result<()> {
+        let (a, b) = (a.min(b), a.max(b));
+        let mut keep: Vec<usize> =
+            keep.iter().copied().filter(|k| *k >= a && k + OBJ.len_utf8() <= b && self.text.get(*k..).is_some_and(|t| t.starts_with(OBJ))).collect();
+        if keep.is_empty() {
+            return self.delete(a, b);
+        }
+        keep.sort_unstable();
+        keep.dedup();
+        // Pieces between the kept objects, last first so earlier offsets stay valid.
+        let mut pieces = Vec::with_capacity(keep.len() + 1);
+        let mut from = a;
+        for k in &keep {
+            pieces.push((from, *k));
+            from = k + OBJ.len_utf8();
+        }
+        pieces.push((from, b));
+        for (x, y) in pieces.into_iter().rev() {
+            if y > x {
+                self.delete(x, y)?;
+            }
+        }
         Ok(())
     }
 
@@ -1060,19 +1303,24 @@ impl Paragraph {
         self.touch();
     }
 
-    /// Previous grapheme boundary before `off` (0 at start).
+    /// Previous caret stop before `off` (0 at start): a grapheme boundary that doesn't split a
+    /// complex-script syllable ([`crate::cluster`]).
     pub fn prev_boundary(&self, off: usize) -> usize {
-        use unicode_segmentation::GraphemeCursor;
-        let off = self.clamp(off);
-        let mut c = GraphemeCursor::new(off, self.text.len(), true);
-        c.prev_boundary(&self.text, 0).ok().flatten().unwrap_or(0)
+        crate::cluster::prev_cluster(&self.text, self.clamp(off))
     }
-    /// Next grapheme boundary after `off` (len at end).
+    /// Next caret stop after `off` (len at end), see [`Self::prev_boundary`].
     pub fn next_boundary(&self, off: usize) -> usize {
-        use unicode_segmentation::GraphemeCursor;
+        crate::cluster::next_cluster(&self.text, self.clamp(off))
+    }
+    /// Where Backspace at `off` deletes from: the previous character in the Brahmic scripts
+    /// (Myanmar, Khmer, Devanagari, Thai…), where it removes one vowel sign or stacked consonant
+    /// at a time, otherwise the previous caret stop.
+    pub fn backspace_from(&self, off: usize) -> usize {
         let off = self.clamp(off);
-        let mut c = GraphemeCursor::new(off, self.text.len(), true);
-        c.next_boundary(&self.text, 0).ok().flatten().unwrap_or(self.text.len())
+        match self.text.get(..off).and_then(|t| t.char_indices().next_back()) {
+            Some((i, c)) if crate::cluster::backspaces_by_char(c) => i,
+            _ => self.prev_boundary(off),
+        }
     }
     /// Start of the word at or before `off` (Ctrl+Left).
     pub fn word_start(&self, off: usize) -> usize {
@@ -1191,8 +1439,12 @@ mod tests {
     fn text_without_takes_ranges_in_any_order() {
         // Multi-byte chars at range edges, an object, and ranges unsorted, overlapping, nested and empty.
         let mut p = Paragraph::with_text("añb€c", CharProps::default());
-        p.insert_object(3, InlineObject::Field { instr: "PAGE".into(), result: "7".into(), locked: false, code: false }, &CharProps::default())
-            .unwrap();
+        p.insert_object(
+            3,
+            InlineObject::Field { instr: "PAGE".into(), result: "7".into(), locked: false, dirty: false, code: false, form: String::new() },
+            &CharProps::default(),
+        )
+        .unwrap();
         let text = p.text.clone();
         let naive = |dropped: &[std::ops::Range<usize>]| {
             let mut out = String::new();
@@ -1261,8 +1513,12 @@ mod tests {
     #[test]
     fn objects_track_text() {
         let mut p = Paragraph::with_text("ab", CharProps::default());
-        p.insert_object(1, InlineObject::Field { instr: "PAGE".into(), result: "1".into(), locked: false, code: false }, &CharProps::default())
-            .unwrap();
+        p.insert_object(
+            1,
+            InlineObject::Field { instr: "PAGE".into(), result: "1".into(), locked: false, dirty: false, code: false, form: String::new() },
+            &CharProps::default(),
+        )
+        .unwrap();
         p.insert_object(0, InlineObject::BookmarkStart { name: "x".into() }, &CharProps::default()).unwrap();
         assert_eq!(p.objects.len(), 2);
         assert!(matches!(p.object_at(0), Some(InlineObject::BookmarkStart { .. })));
@@ -1289,6 +1545,24 @@ mod tests {
         let t = p.split_off(p.len()).unwrap();
         assert!(t.is_empty());
         assert_eq!(t.mark.bold, Some(true));
+    }
+
+    #[test]
+    fn emptying_a_paragraph_keeps_the_formatting_but_not_the_revisions_of_its_text() {
+        let mut props = bold();
+        props.ins = Some(3);
+        props.del = Some(4);
+        let mut p = Paragraph::with_text("Hello", props);
+        p.mark = bold();
+        p.delete(0, 5).unwrap();
+        assert!(p.is_empty());
+        assert_eq!(p.mark.bold, Some(true));
+        assert_eq!((p.mark.ins, p.mark.del), (None, None));
+        // A mark that is itself a tracked change keeps its own revision.
+        let mut p = Paragraph::with_text("Hello", bold());
+        p.mark.del = Some(7);
+        p.delete(0, 5).unwrap();
+        assert_eq!((p.mark.ins, p.mark.del), (None, Some(7)));
     }
 
     #[test]

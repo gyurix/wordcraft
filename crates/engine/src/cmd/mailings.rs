@@ -1,5 +1,5 @@
 //! Mailings tab: mail merge (recipients from CSV/JSON or an Excel/OpenDocument spreadsheet,
-//! merge fields, preview, finish), envelopes and labels.
+//! filtered and sorted; merge fields, preview, finish), envelopes and labels.
 
 use serde_json::{Value, json};
 use wordcraft_doc::para::InlineObject;
@@ -15,10 +15,305 @@ use crate::{CmdError, CmdResult, CommandSpec, Selection, Session, p};
 pub struct MergeState {
     pub kind: String,
     pub headers: Vec<String>,
+    /// The records the merge uses: [`MergeState::source`] filtered and sorted.
     pub rows: Vec<Vec<String>>,
+    /// Every record of the list, in file order (Edit Recipient List edits these).
+    pub source: Vec<Vec<String>>,
+    /// Filter Recipients: which records merge (none: all).
+    pub filter: Vec<FilterRule>,
+    /// Sort Recipients: the order they merge in (none: the list's order).
+    pub sort: Vec<SortKey>,
     pub preview: bool,
     pub record: usize,
     pub highlight: bool,
+}
+
+/// A Filter Recipients comparison.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FilterOp {
+    Equal,
+    NotEqual,
+    Less,
+    Greater,
+    LessOrEqual,
+    GreaterOrEqual,
+    Blank,
+    NotBlank,
+    Contains,
+    NotContains,
+}
+
+impl FilterOp {
+    /// Every comparison, in the order the dialog lists them.
+    pub const ALL: [FilterOp; 10] = [
+        FilterOp::Equal,
+        FilterOp::NotEqual,
+        FilterOp::Less,
+        FilterOp::Greater,
+        FilterOp::LessOrEqual,
+        FilterOp::GreaterOrEqual,
+        FilterOp::Blank,
+        FilterOp::NotBlank,
+        FilterOp::Contains,
+        FilterOp::NotContains,
+    ];
+
+    /// The id used in command params.
+    pub fn id(self) -> &'static str {
+        match self {
+            FilterOp::Equal => "equal",
+            FilterOp::NotEqual => "notEqual",
+            FilterOp::Less => "less",
+            FilterOp::Greater => "greater",
+            FilterOp::LessOrEqual => "lessOrEqual",
+            FilterOp::GreaterOrEqual => "greaterOrEqual",
+            FilterOp::Blank => "blank",
+            FilterOp::NotBlank => "notBlank",
+            FilterOp::Contains => "contains",
+            FilterOp::NotContains => "notContains",
+        }
+    }
+
+    /// The dialog's label (English source text).
+    pub fn label(self) -> &'static str {
+        match self {
+            FilterOp::Equal => "Equal to",
+            FilterOp::NotEqual => "Not equal to",
+            FilterOp::Less => "Less than",
+            FilterOp::Greater => "Greater than",
+            FilterOp::LessOrEqual => "Less than or equal",
+            FilterOp::GreaterOrEqual => "Greater than or equal",
+            FilterOp::Blank => "Is blank",
+            FilterOp::NotBlank => "Is not blank",
+            FilterOp::Contains => "Contains",
+            FilterOp::NotContains => "Does not contain",
+        }
+    }
+
+    /// An id, a symbol (`=`, `<>`, `<`, `>`, `<=`, `>=`) or a spelled-out alias, any case.
+    pub fn parse(t: &str) -> Option<FilterOp> {
+        let k: String = t.trim().chars().filter(|c| !matches!(c, ' ' | '_' | '-')).collect::<String>().to_ascii_lowercase();
+        Some(match k.as_str() {
+            "equal" | "equals" | "equalto" | "=" | "==" | "eq" => FilterOp::Equal,
+            "notequal" | "notequalto" | "<>" | "!=" | "ne" => FilterOp::NotEqual,
+            "less" | "lessthan" | "<" | "lt" => FilterOp::Less,
+            "greater" | "greaterthan" | ">" | "gt" => FilterOp::Greater,
+            "lessorequal" | "lessthanorequal" | "<=" | "le" => FilterOp::LessOrEqual,
+            "greaterorequal" | "greaterthanorequal" | ">=" | "ge" => FilterOp::GreaterOrEqual,
+            "blank" | "isblank" | "empty" => FilterOp::Blank,
+            "notblank" | "isnotblank" | "notempty" => FilterOp::NotBlank,
+            "contains" => FilterOp::Contains,
+            "notcontains" | "doesnotcontain" => FilterOp::NotContains,
+            _ => return None,
+        })
+    }
+
+    /// Whether the comparison takes a value (Is blank / Is not blank don't).
+    pub fn has_value(self) -> bool {
+        !matches!(self, FilterOp::Blank | FilterOp::NotBlank)
+    }
+}
+
+/// One Filter Recipients row: `field op value`, joined to the row before by And (`or` false) or
+/// Or. And binds tighter than Or: `a And b Or c` keeps records matching both a and b, or c.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FilterRule {
+    pub field: String,
+    pub op: FilterOp,
+    pub value: String,
+    pub or: bool,
+}
+
+/// One Sort Recipients key.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SortKey {
+    pub field: String,
+    pub descending: bool,
+}
+
+/// Most filter rows and sort keys a list keeps.
+const MAX_RULES: usize = 64;
+const MAX_SORT_KEYS: usize = 8;
+
+/// Two cell values compared: as numbers when both are numbers, else as text ignoring case.
+/// Orders two cells: numbers (compared numerically) before text (compared
+/// case-insensitively). This is a total order, so `sort_by` stays consistent
+/// (and can't panic) on columns that mix numbers and text, such as `9`, `10`, `1A`.
+fn compare_cells(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering::{Greater, Less};
+    let number = |s: &str| s.parse::<f64>().ok().filter(|x| x.is_finite());
+    let (a, b) = (a.trim(), b.trim());
+    match (number(a), number(b)) {
+        (Some(x), Some(y)) => x.total_cmp(&y),
+        (Some(_), None) => Less,
+        (None, Some(_)) => Greater,
+        (None, None) => a.to_lowercase().cmp(&b.to_lowercase()),
+    }
+}
+
+fn rule_holds(r: &FilterRule, cell: &str) -> bool {
+    use std::cmp::Ordering::{Equal, Greater, Less};
+    let ord = || compare_cells(cell, &r.value);
+    let lower = || (cell.to_lowercase(), r.value.trim().to_lowercase());
+    match r.op {
+        FilterOp::Equal => ord() == Equal,
+        FilterOp::NotEqual => ord() != Equal,
+        FilterOp::Less => ord() == Less,
+        FilterOp::Greater => ord() == Greater,
+        FilterOp::LessOrEqual => ord() != Greater,
+        FilterOp::GreaterOrEqual => ord() != Less,
+        FilterOp::Blank => cell.trim().is_empty(),
+        FilterOp::NotBlank => !cell.trim().is_empty(),
+        FilterOp::Contains => {
+            let (c, v) = lower();
+            c.contains(&v)
+        }
+        FilterOp::NotContains => {
+            let (c, v) = lower();
+            !c.contains(&v)
+        }
+    }
+}
+
+/// The records (indices into `rows`) that `filter` keeps, in `sort` order (stable: ties keep the
+/// list's order). Rules and keys naming a field that isn't in `headers` are ignored.
+pub fn select_records(headers: &[String], rows: &[Vec<String>], filter: &[FilterRule], sort: &[SortKey]) -> Vec<usize> {
+    let col = |f: &str| headers.iter().position(|h| h.eq_ignore_ascii_case(f.trim()));
+    let rules: Vec<(Option<usize>, &FilterRule)> = filter.iter().map(|r| (col(&r.field), r)).filter(|(c, _)| c.is_some()).collect();
+    let keep = |row: &Vec<String>| {
+        if rules.is_empty() {
+            return true;
+        }
+        // Or-groups of And-ed rules.
+        let mut any = false;
+        let mut all = true;
+        for (k, (c, r)) in rules.iter().enumerate() {
+            if k > 0 && r.or {
+                any |= all;
+                all = true;
+            }
+            let cell = c.and_then(|c| row.get(c)).map(String::as_str).unwrap_or("");
+            all = all && rule_holds(r, cell);
+        }
+        any || all
+    };
+    let mut out: Vec<usize> = rows.iter().enumerate().filter(|(_, r)| keep(r)).map(|(i, _)| i).collect();
+    let keys: Vec<(usize, bool)> = sort.iter().filter_map(|k| col(&k.field).map(|c| (c, k.descending))).collect();
+    if !keys.is_empty() {
+        out.sort_by(|a, b| {
+            for (c, desc) in &keys {
+                let get = |i: &usize| rows.get(*i).and_then(|r| r.get(*c)).map(String::as_str).unwrap_or("");
+                let o = compare_cells(get(a), get(b));
+                let o = if *desc { o.reverse() } else { o };
+                if o != std::cmp::Ordering::Equal {
+                    return o;
+                }
+            }
+            std::cmp::Ordering::Equal
+        });
+    }
+    out
+}
+
+/// Recompute the merged records from the list, its filter and its sort; back to the first.
+fn apply_filter(s: &mut Session) {
+    let m = &mut s.merge;
+    let headers = &m.headers;
+    m.filter.retain(|r| headers.iter().any(|h| h.eq_ignore_ascii_case(r.field.trim())));
+    m.sort.retain(|k| headers.iter().any(|h| h.eq_ignore_ascii_case(k.field.trim())));
+    m.rows = select_records(&m.headers, &m.source, &m.filter, &m.sort).into_iter().filter_map(|i| m.source.get(i).cloned()).collect();
+    m.record = 0;
+    if m.rows.is_empty() {
+        m.preview = false;
+    }
+    refresh_shown(s);
+}
+
+/// [`refresh`] for the non-mutating recipient-list commands: in a protected document the merge
+/// fields' shown results stay as they are, since these commands skip the protection checks and
+/// undo (Preview Results and the record buttons, which mutate, show the new list's values).
+fn refresh_shown(s: &mut Session) {
+    if !super::protect::enforced(&s.doc) {
+        refresh(s);
+    }
+}
+
+/// The canonical field name for `f` (any case), or a params error.
+fn known_field(headers: &[String], f: &str) -> Result<String, CmdError> {
+    headers
+        .iter()
+        .find(|h| h.eq_ignore_ascii_case(f.trim()))
+        .cloned()
+        .ok_or_else(|| CmdError::Params(format!("no field named `{f}` in the recipient list")))
+}
+
+fn parse_rules(headers: &[String], v: Option<&Value>) -> Result<Vec<FilterRule>, CmdError> {
+    let arr = match v {
+        None | Some(Value::Null) => return Ok(Vec::new()),
+        Some(Value::Array(a)) => a,
+        Some(_) => return Err(CmdError::Params("`rules` must be an array of {field, op, value, join}".into())),
+    };
+    if arr.len() > MAX_RULES {
+        return Err(CmdError::Params(format!("at most {MAX_RULES} filter rules")));
+    }
+    let mut out = Vec::new();
+    for r in arr {
+        let field = p::str(r, "field").ok_or_else(|| CmdError::Params("each rule needs a `field`".into()))?;
+        let op = p::str(r, "op").or_else(|| p::str(r, "comparison")).unwrap_or("equal");
+        let op = FilterOp::parse(op).ok_or_else(|| {
+            CmdError::Params(format!("unknown `op` `{op}`; one of {}", FilterOp::ALL.iter().map(|o| o.id()).collect::<Vec<_>>().join(", ")))
+        })?;
+        let or = match p::str(r, "join").map(|j| j.trim().to_ascii_lowercase()) {
+            None => false,
+            Some(j) if j == "and" => false,
+            Some(j) if j == "or" => true,
+            Some(_) => return Err(CmdError::Params("`join` must be \"and\" or \"or\"".into())),
+        };
+        let value = r.get("value").map(cell).unwrap_or_default();
+        out.push(FilterRule { field: known_field(headers, field)?, op, value, or });
+    }
+    Ok(out)
+}
+
+fn parse_sort(headers: &[String], v: Option<&Value>) -> Result<Vec<SortKey>, CmdError> {
+    let arr: Vec<Value> = match v {
+        None | Some(Value::Null) => return Ok(Vec::new()),
+        Some(Value::Array(a)) => a.clone(),
+        Some(o @ (Value::Object(_) | Value::String(_))) => vec![o.clone()],
+        Some(_) => return Err(CmdError::Params("`sort` must be an array of {field, descending}".into())),
+    };
+    if arr.len() > MAX_SORT_KEYS {
+        return Err(CmdError::Params(format!("at most {MAX_SORT_KEYS} sort keys")));
+    }
+    arr.iter()
+        .map(|k| {
+            let (field, descending) = match k {
+                Value::String(f) => (f.as_str(), false),
+                _ => (
+                    p::str(k, "field").ok_or_else(|| CmdError::Params("each sort key needs a `field`".into()))?,
+                    p::bool(k, "descending").unwrap_or(false),
+                ),
+            };
+            Ok(SortKey { field: known_field(headers, field)?, descending })
+        })
+        .collect()
+}
+
+fn rules_json(m: &MergeState) -> Value {
+    json!(
+        m.filter
+            .iter()
+            .map(|r| json!({"field": r.field, "op": r.op.id(), "value": r.value, "join": if r.or { "or" } else { "and" }}))
+            .collect::<Vec<_>>()
+    )
+}
+
+fn sort_json(m: &MergeState) -> Value {
+    json!(m.sort.iter().map(|k| json!({"field": k.field, "descending": k.descending})).collect::<Vec<_>>())
+}
+
+fn filter_result(s: &Session) -> CmdResult {
+    Ok(json!({"records": s.merge.rows.len(), "of": s.merge.source.len(), "rules": rules_json(&s.merge), "sort": sort_json(&s.merge)}))
 }
 
 fn has_recipients(s: &Session) -> Option<&'static str> {
@@ -47,16 +342,52 @@ pub fn specs() -> Vec<CommandSpec> {
         .params(r#"{"kind": "letters|emails|envelopes|labels|directory|normal"}"#)
         .pure(),
         CommandSpec::new("mailings.recipients", "Select Recipients", "Mailings › Start Mail Merge", recipients)
-            .params(r#"{"csv"?: string, "path"?: string (.csv/.tsv/.txt, or a .xlsx/.xlsm/.ods workbook), "data"?: base64 (a file's bytes, as for path), "sheet"?: name | number (1 = first; a workbook with several sheets and no sheet answers {"sheets": [...], "chooseSheet": true} and loads nothing), "headers"?: bool (default true: the first non-blank row names the fields; false: fields are Column 1…N), "rows"?: [{field: value}] | [[value]], "fields"?: [string] (column order; required with array rows)}"#)
+            .params(r#"{"csv"?: string, "path"?: string (.csv/.tsv/.txt, or a .xlsx/.xlsm/.xls/.ods workbook), "data"?: base64 (a file's bytes, as for path), "encoding"?: string (a text list's encoding, e.g. "gbk", "big5", "shift_jis", "utf-16le"; default: detected), "sheet"?: name | number (1 = first; a workbook with several sheets and no sheet answers {"sheets": [...], "chooseSheet": true} and loads nothing), "headers"?: bool (default true: the first non-blank row names the fields; false: fields are Column 1…N), "rows"?: [{field: value}] | [[value]], "fields"?: [string] (column order; required with array rows)}"#)
             .pure(),
         CommandSpec::new("mailings.editRecipients", "Edit Recipient List", "Mailings › Start Mail Merge", |s, v| {
             if v.get("rows").and_then(Value::as_array).is_some() {
-                return recipients(s, &json!({"rows": v.get("rows"), "fields": v.get("fields")}));
+                // Edited records keep the list's filter and sort (rules on removed fields drop).
+                // Copies, so a list that fails to load leaves the filter and sort as they were.
+                let (filter, sort) = (s.merge.filter.clone(), s.merge.sort.clone());
+                let r = recipients(s, &json!({"rows": v.get("rows"), "fields": v.get("fields")}))?;
+                s.merge.filter = filter;
+                s.merge.sort = sort;
+                apply_filter(s);
+                return Ok(json!({"fields": r.get("fields"), "records": s.merge.rows.len(), "of": s.merge.source.len()}));
             }
-            Ok(json!({"headers": s.merge.headers, "rows": s.merge.rows}))
+            Ok(json!({
+                "headers": s.merge.headers,
+                "rows": s.merge.source,
+                "records": s.merge.rows.len(),
+                "rules": rules_json(&s.merge),
+                "sort": sort_json(&s.merge),
+            }))
         })
-        .params(r#"{"rows"?: [{field: value}] | [[value]], "fields"?: [string]}"#)
+        .params(r#"{"rows"?: [{field: value}] | [[value]], "fields"?: [string]} (no params: the list as {headers, rows (every record), records (how many merge), rules, sort})"#)
         .key(super::non_mac("Alt+Shift+E"))
+        .when(has_list)
+        .pure(),
+        CommandSpec::new("mailings.filterRecipients", "Filter Recipients", "Mailings › Start Mail Merge › Edit Recipient List", |s, v| {
+            let filter = parse_rules(&s.merge.headers, v.get("rules"))?;
+            let sort = match v.get("sort") {
+                Some(x) => parse_sort(&s.merge.headers, Some(x))?,
+                None if v.get("rules").is_none() => Vec::new(),
+                None => s.merge.sort.clone(),
+            };
+            s.merge.filter = filter;
+            s.merge.sort = sort;
+            apply_filter(s);
+            filter_result(s)
+        })
+        .params(r#"{"rules"?: [{"field": string, "op": "equal|notEqual|less|greater|lessOrEqual|greaterOrEqual|blank|notBlank|contains|notContains", "value"?: string, "join"?: "and|or" (with the rule before; And binds tighter)}], "sort"?: [{"field": string, "descending"?: bool}]} (replaces the filter; `sort` too when given; {} clears both). Preview, Finish & Merge and labels use only the matching records, in sort order"#)
+        .when(has_list)
+        .pure(),
+        CommandSpec::new("mailings.sortRecipients", "Sort Recipients", "Mailings › Start Mail Merge › Edit Recipient List", |s, v| {
+            s.merge.sort = parse_sort(&s.merge.headers, v.get("sort").or_else(|| v.get("field").map(|_| v)))?;
+            apply_filter(s);
+            filter_result(s)
+        })
+        .params(r#"{"sort"?: [{"field": string, "descending"?: bool}]} | {"field": string, "descending"?: bool} (no params: the list's own order)"#)
         .when(has_list)
         .pure(),
         CommandSpec::new("mailings.insertField", "Insert Merge Field", "Mailings › Write & Insert Fields", |s, v| {
@@ -136,10 +467,12 @@ pub fn specs() -> Vec<CommandSpec> {
             .params(r#"{"path"?: string (save the merged document), "from"?: n, "to"?: n}"#)
             .key(super::non_mac("Alt+Shift+N"))
             .when(has_recipients),
-        CommandSpec::new("mailings.envelopes", "Envelopes", "Mailings › Create", envelopes)
-            .params(r#"{"delivery": string, "return"?: string, "size"?: "Envelope #10|Envelope DL"}"#),
-        CommandSpec::new("mailings.labels", "Labels", "Mailings › Create", labels)
-            .params(r#"{"text"?: string, "rows"?: n, "cols"?: n, "fromRecipients"?: bool}"#),
+        CommandSpec::new("mailings.envelopes", "Envelopes", "Mailings › Create", envelopes).params(
+            r#"{"delivery": string, "return"?: string, "size"?: "Envelope #10|#9|Monarch|DL|C4|C5|C6|B5", "width"?: pt, "height"?: pt, "add"?: bool (add to this document instead of a new one)}"#,
+        ),
+        CommandSpec::new("mailings.labels", "Labels", "Mailings › Create", labels).params(
+            r#"{"text"?: string, "product"?: "letter-3x10|letter-2x10|letter-2x7|letter-2x5|letter-4x20|a4-3x7|a4-2x7|a4-3x8|a4-2x4", "rows"?: n, "cols"?: n, "fromRecipients"?: bool, "single"?: {"row": n, "col": n}}"#,
+        ),
     ]
 }
 
@@ -152,7 +485,14 @@ fn insert_field(s: &mut Session, instr: &str, placeholder: &str) -> CmdResult {
     let at = delete_selection(s)?;
     let end = s.doc.insert_object(
         &at,
-        InlineObject::Field { instr: instr.to_string(), result: placeholder.to_string(), locked: false, code: false },
+        InlineObject::Field {
+            instr: instr.to_string(),
+            result: placeholder.to_string(),
+            locked: false,
+            dirty: false,
+            code: false,
+            form: String::new(),
+        },
         &props,
     )?;
     s.sel = Selection::caret(end);
@@ -269,8 +609,27 @@ fn recipients(s: &mut Session, v: &Value) -> CmdResult {
             } else {
                 return Err(CmdError::Params("`csv`, `path`, `data` or `rows` required".into()));
             };
-            let spreadsheet =
-                ext.as_deref().is_some_and(wordcraft_formats::sheet::is_extension) || wordcraft_formats::sheet::detect(&bytes).is_some();
+            // A spreadsheet by its contents, or by its name unless it is really text (a CSV or tab-
+            // separated export named .xls, as some programs write).
+            let named = ext.as_deref().is_some_and(wordcraft_formats::sheet::is_extension);
+            let text = wordcraft_formats::txt::is_text(&bytes);
+            let spreadsheet = wordcraft_formats::sheet::detect(&bytes).is_some() || (named && !text);
+            if named && !spreadsheet {
+                let text = decode(&bytes, v)?;
+                let text = text.trim_start().trim_start_matches('\u{feff}');
+                if text.starts_with("<?xml") {
+                    return Err(CmdError::Failed(
+                        "this spreadsheet file is an XML spreadsheet, not a workbook; open it in a spreadsheet program, save it as .xlsx or .csv and select it again"
+                            .into(),
+                    ));
+                }
+                if text.starts_with('<') {
+                    return Err(CmdError::Failed(
+                        "this spreadsheet file is a web page (HTML), not a workbook; open it in a spreadsheet program, save it as .xlsx or .csv and select it again"
+                            .into(),
+                    ));
+                }
+            }
             if spreadsheet {
                 use wordcraft_formats::sheet::{Pick, read_rows, sheet_names};
                 let pick = match v.get("sheet") {
@@ -297,15 +656,18 @@ fn recipients(s: &mut Session, v: &Value) -> CmdResult {
                 sheet = json!(chosen);
                 rows
             } else {
-                parse_csv(&crate::io::decode_text(&bytes))
+                parse_csv(&decode(&bytes, v)?)
             }
         };
         header_split(all, p::bool(v, "headers").unwrap_or(true))?
     };
     s.merge.headers = headers;
+    s.merge.source = rows.clone();
     s.merge.rows = rows;
+    s.merge.filter.clear();
+    s.merge.sort.clear();
     s.merge.record = 0;
-    refresh(s);
+    refresh_shown(s);
     let mut r = json!({"fields": s.merge.headers, "records": s.merge.rows.len()});
     if !sheet.is_null() {
         r["sheet"] = sheet;
@@ -313,19 +675,31 @@ fn recipients(s: &mut Session, v: &Value) -> CmdResult {
     Ok(r)
 }
 
+/// A text recipient list's characters: in `encoding` when given (a label such as `gbk`,
+/// `big5`, `shift_jis`, `utf-16le`, `windows-1251`), else as detected (UTF-8 or UTF-16 by BOM or
+/// shape, else the legacy encoding the bytes look like: GBK, Big5, Shift_JIS, Windows-1252…).
+fn decode(bytes: &[u8], v: &Value) -> Result<String, CmdError> {
+    match p::str(v, "encoding").map(str::trim).filter(|e| !e.is_empty()) {
+        Some(label) => wordcraft_formats::txt::decode_as(bytes, label).ok_or_else(|| CmdError::Params(format!("unknown `encoding` `{label}`"))),
+        None => Ok(crate::io::decode_text(bytes)),
+    }
+}
+
+/// File extensions Select Recipients › Use an Existing List… opens.
+pub const RECIPIENT_EXTENSIONS: &[&str] = &["csv", "tsv", "txt", "xlsx", "xlsm", "xls", "ods"];
+
+/// Whether a file name is a spreadsheet read as a recipient list (.xlsx, .xlsm, .xls, .ods).
+pub fn is_spreadsheet_name(name: &str) -> bool {
+    std::path::Path::new(name).extension().is_some_and(|e| wordcraft_formats::sheet::is_extension(&e.to_string_lossy()))
+}
+
 /// A file's extension, lower case.
 fn extension(path: &str) -> Option<String> {
     std::path::Path::new(path).extension().map(|e| e.to_string_lossy().to_ascii_lowercase())
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn read_file(path: &str) -> Result<Vec<u8>, CmdError> {
-    std::fs::read(path).map_err(|e| CmdError::Failed(format!("{path}: {e}")))
-}
-
-#[cfg(target_arch = "wasm32")]
-fn read_file(_path: &str) -> Result<Vec<u8>, CmdError> {
-    Err(CmdError::Failed("paths aren't available on the web; pass `data`".into()))
+    crate::io::read_file(path).map_err(CmdError::Failed)
 }
 
 /// Field names and records from a table's rows: with `headers`, the first row names the fields
@@ -739,17 +1113,41 @@ fn merge_blocks(s: &Session, blocks: &mut Blocks, cur: &mut usize, end: usize, d
     true
 }
 
+/// Common envelope sizes: name, width and height in points (long side first).
+pub const ENVELOPE_SIZES: [(&str, f32, f32); 8] = [
+    ("Envelope #10", 684.0, 297.0),
+    ("Envelope #9", 639.0, 279.0),
+    ("Envelope Monarch", 540.0, 279.0),
+    ("Envelope DL", 623.6, 311.8),
+    ("Envelope C4", 918.4, 649.1),
+    ("Envelope C5", 649.1, 459.2),
+    ("Envelope C6", 459.2, 323.1),
+    ("Envelope B5", 708.7, 498.9),
+];
+
+/// Envelope size by name (`Envelope DL`, or just `DL`, any case), or `width`/`height` in points.
+fn envelope_size(v: &Value) -> Result<(f32, f32), CmdError> {
+    if let (Some(w), Some(h)) = (p::f32(v, "width"), p::f32(v, "height")) {
+        let (w, h) = (w.clamp(144.0, 1584.0), h.clamp(144.0, 1584.0));
+        return Ok((w.max(h), w.min(h)));
+    }
+    let name = p::str(v, "size").unwrap_or("Envelope #10").trim();
+    ENVELOPE_SIZES
+        .iter()
+        .find(|(n, ..)| n.eq_ignore_ascii_case(name) || n.strip_prefix("Envelope ").is_some_and(|short| short.eq_ignore_ascii_case(name)))
+        .map(|(_, w, h)| (*w, *h))
+        .ok_or_else(|| CmdError::Params(format!("unknown envelope size `{name}`")))
+}
+
+/// Envelopes: a landscape page with the return address at the top left and the delivery address
+/// in the middle. As a new document, or (`add`) as a section of its own at the start of this one.
 fn envelopes(s: &mut Session, v: &Value) -> CmdResult {
     let delivery = p::str(v, "delivery").map(str::to_string).unwrap_or_else(|| {
         if s.merge.rows.is_empty() { "Recipient Name\nStreet Address\nCity, ST 00000".into() } else { address_block(s, s.merge.record) }
     });
     let ret = p::str(v, "return").unwrap_or("").to_string();
-    let (w, h) = match p::str(v, "size").unwrap_or("Envelope #10") {
-        "Envelope DL" => (623.6, 311.8),
-        _ => (684.0, 297.0),
-    };
-    let mut d = Document::new();
-    d.last_section = SectionProps {
+    let (w, h) = envelope_size(v)?;
+    let sect = SectionProps {
         page_w: w,
         page_h: h,
         landscape: true,
@@ -759,55 +1157,262 @@ fn envelopes(s: &mut Session, v: &Value) -> CmdResult {
         margin_bottom: 22.0,
         ..Default::default()
     };
+    // Addresses are capped: a pasted novel is not an address.
+    let lines = |t: &str| t.split('\n').take(20).map(str::to_string).collect::<Vec<_>>();
     let mut blocks = Vec::new();
-    for l in ret.split('\n') {
+    let ret_lines = if ret.is_empty() { Vec::new() } else { lines(&ret) };
+    for l in &ret_lines {
         blocks.push(para_block(Paragraph::with_text(l, CharProps { size: Some(10.0), ..Default::default() }).styled("NoSpacing")));
     }
-    let spacer = (6 - ret.lines().count().min(6)).max(1);
+    let spacer = (6 - ret_lines.len().min(6)).max(1);
     for _ in 0..spacer + 2 {
         blocks.push(para_block(Paragraph::new().styled("NoSpacing")));
     }
-    for l in delivery.split('\n') {
-        let mut p = Paragraph::with_text(l, CharProps::default()).styled("NoSpacing");
+    let mut last = None;
+    for l in lines(&delivery) {
+        let mut p = Paragraph::with_text(&l, CharProps::default()).styled("NoSpacing");
         p.props.indent_left = Some(w * 0.42);
-        blocks.push(para_block(p));
+        if let Some(prev) = last.replace(p) {
+            blocks.push(para_block(prev));
+        }
     }
+    if p::bool(v, "add") == Some(true) {
+        // The envelope's own section ends with its last address line.
+        let mut end = last.unwrap_or_else(|| Paragraph::new().styled("NoSpacing"));
+        end.section = Some(Box::new(sect));
+        blocks.push(para_block(end));
+        let n = blocks.len();
+        s.doc.body.splice(0..0, blocks);
+        s.sel = Selection::caret(s.doc.start_of(StoryRef::Body));
+        return Ok(json!({"width": w, "height": h, "added": n}));
+    }
+    blocks.extend(last.map(para_block));
+    let mut d = Document::new();
+    d.last_section = sect;
     d.body = blocks;
     s.set_document(d);
     s.path = None;
     Ok(json!({"width": w, "height": h}))
 }
 
+/// A sheet of labels: the label size, how many across and down, and where the first one sits.
+/// Lengths in points; the pitch is from one label's edge to the next one's.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LabelProduct {
+    pub id: &'static str,
+    /// What the labels are for: `address`, `shipping` or `return`.
+    pub kind: &'static str,
+    /// Letter or A4.
+    pub paper: &'static str,
+    pub cols: usize,
+    pub rows: usize,
+    pub width: f32,
+    pub height: f32,
+    pub top: f32,
+    pub side: f32,
+    pub h_pitch: f32,
+    pub v_pitch: f32,
+}
+
+const MM: f32 = 72.0 / 25.4;
+
+/// Common label sheets (the sizes are the industry's; the names are ours).
+pub const LABEL_PRODUCTS: [LabelProduct; 9] = [
+    LabelProduct {
+        id: "letter-3x10",
+        kind: "address",
+        paper: "Letter",
+        cols: 3,
+        rows: 10,
+        width: 189.0,
+        height: 72.0,
+        top: 36.0,
+        side: 13.5,
+        h_pitch: 198.0,
+        v_pitch: 72.0,
+    },
+    LabelProduct {
+        id: "letter-2x10",
+        kind: "address",
+        paper: "Letter",
+        cols: 2,
+        rows: 10,
+        width: 288.0,
+        height: 72.0,
+        top: 36.0,
+        side: 11.25,
+        h_pitch: 301.5,
+        v_pitch: 72.0,
+    },
+    LabelProduct {
+        id: "letter-2x7",
+        kind: "address",
+        paper: "Letter",
+        cols: 2,
+        rows: 7,
+        width: 288.0,
+        height: 96.0,
+        top: 60.0,
+        side: 11.25,
+        h_pitch: 301.5,
+        v_pitch: 96.0,
+    },
+    LabelProduct {
+        id: "letter-2x5",
+        kind: "shipping",
+        paper: "Letter",
+        cols: 2,
+        rows: 5,
+        width: 288.0,
+        height: 144.0,
+        top: 36.0,
+        side: 11.25,
+        h_pitch: 301.5,
+        v_pitch: 144.0,
+    },
+    LabelProduct {
+        id: "letter-4x20",
+        kind: "return",
+        paper: "Letter",
+        cols: 4,
+        rows: 20,
+        width: 126.0,
+        height: 36.0,
+        top: 36.0,
+        side: 21.6,
+        h_pitch: 147.6,
+        v_pitch: 36.0,
+    },
+    LabelProduct {
+        id: "a4-3x7",
+        kind: "address",
+        paper: "A4",
+        cols: 3,
+        rows: 7,
+        width: 63.5 * MM,
+        height: 38.1 * MM,
+        top: 15.15 * MM,
+        side: 7.21 * MM,
+        h_pitch: 66.04 * MM,
+        v_pitch: 38.1 * MM,
+    },
+    LabelProduct {
+        id: "a4-2x7",
+        kind: "address",
+        paper: "A4",
+        cols: 2,
+        rows: 7,
+        width: 99.1 * MM,
+        height: 38.1 * MM,
+        top: 15.15 * MM,
+        side: 4.65 * MM,
+        h_pitch: 101.6 * MM,
+        v_pitch: 38.1 * MM,
+    },
+    LabelProduct {
+        id: "a4-3x8",
+        kind: "address",
+        paper: "A4",
+        cols: 3,
+        rows: 8,
+        width: 63.5 * MM,
+        height: 33.9 * MM,
+        top: 12.9 * MM,
+        side: 7.21 * MM,
+        h_pitch: 66.04 * MM,
+        v_pitch: 33.9 * MM,
+    },
+    LabelProduct {
+        id: "a4-2x4",
+        kind: "shipping",
+        paper: "A4",
+        cols: 2,
+        rows: 4,
+        width: 99.1 * MM,
+        height: 67.7 * MM,
+        top: 13.1 * MM,
+        side: 4.65 * MM,
+        h_pitch: 101.6 * MM,
+        v_pitch: 67.7 * MM,
+    },
+];
+
+impl LabelProduct {
+    pub fn by_id(id: &str) -> Option<&'static LabelProduct> {
+        LABEL_PRODUCTS.iter().find(|p| p.id == id)
+    }
+    /// Label size as people say it: inches on Letter, millimetres on A4.
+    pub fn size_text(&self) -> String {
+        if self.paper == "A4" {
+            format!("{:.1} × {:.1} mm", self.width / MM, self.height / MM)
+        } else {
+            let i = |pt: f32| format!("{}", ((pt / 72.0) * 1000.0).round() / 1000.0);
+            format!("{}\" × {}\"", i(self.width), i(self.height))
+        }
+    }
+}
+
+/// Labels: a new document with a table of labels laid out like the sheet (`product`; spacer
+/// columns and rows stand for the gaps). A full page of the same `text` (or one recipient per
+/// label), or (`single`: `{"row", "col"}`, from 1) one label at that place on the sheet.
 fn labels(s: &mut Session, v: &Value) -> CmdResult {
-    // A 3 × 10 sheet of 2.625" × 1" labels on Letter (a common layout).
-    let rows = p::u64(v, "rows").unwrap_or(10).clamp(1, 40) as usize;
-    let cols = p::u64(v, "cols").unwrap_or(3).clamp(1, 10) as usize;
-    let from_rec = p::bool(v, "fromRecipients").unwrap_or(!s.merge.rows.is_empty() && p::str(v, "text").is_none());
+    let prod = match p::str(v, "product") {
+        Some(id) => *LabelProduct::by_id(id).ok_or_else(|| CmdError::Params(format!("unknown label product `{id}`")))?,
+        None => LABEL_PRODUCTS[0],
+    };
+    let rows = p::u64(v, "rows").map_or(prod.rows, |n| n.clamp(1, 40) as usize);
+    let cols = p::u64(v, "cols").map_or(prod.cols, |n| n.clamp(1, 10) as usize);
+    let single = v.get("single").filter(|x| !x.is_null()).map(|x| {
+        let at = |k: &str| x.get(k).and_then(Value::as_u64).unwrap_or(1).max(1) as usize;
+        (at("row").min(rows), at("col").min(cols))
+    });
+    let from_rec = single.is_none() && p::bool(v, "fromRecipients").unwrap_or(!s.merge.rows.is_empty() && p::str(v, "text").is_none());
     let text = p::str(v, "text").unwrap_or("Name\nAddress\nCity, ST 00000").to_string();
+    let (page_w, page_h) = if prod.paper == "A4" { (595.3, 841.9) } else { (612.0, 792.0) };
+    let h_gap = (prod.h_pitch - prod.width).max(0.0);
+    let v_gap = (prod.v_pitch - prod.height).max(0.0);
     let mut d = Document::new();
-    d.last_section.margin_top = 36.0;
+    d.last_section.page_w = page_w;
+    d.last_section.page_h = page_h;
+    d.last_section.margin_top = prod.top;
     d.last_section.margin_bottom = 0.0;
-    d.last_section.margin_left = 13.5;
-    d.last_section.margin_right = 13.5;
-    let mut t = Table::new(rows, cols, 189.0 * cols as f32);
+    d.last_section.margin_left = prod.side;
+    d.last_section.margin_right = (page_w - prod.side - prod.h_pitch * (cols - 1) as f32 - prod.width).max(0.0);
+    d.last_section.header = 0.0;
+    d.last_section.footer = 0.0;
+    // Grid columns: label, gap, label, …; rows likewise.
+    let grid_cols: Vec<Option<usize>> = (0..cols).flat_map(|c| [Some(c)].into_iter().chain((c + 1 < cols && h_gap > 0.5).then_some(None))).collect();
+    let grid_rows: Vec<Option<usize>> = (0..rows).flat_map(|r| [Some(r)].into_iter().chain((r + 1 < rows && v_gap > 0.5).then_some(None))).collect();
+    let width: f32 = grid_cols.iter().map(|c| if c.is_some() { prod.width } else { h_gap }).sum();
+    let mut t = Table::new(grid_rows.len(), grid_cols.len(), width);
     t.props.style = None;
     t.props.borders = Some(wordcraft_doc::props::Borders::default());
     t.props.fixed = true;
+    t.grid = grid_cols.iter().map(|c| if c.is_some() { prod.width } else { h_gap }).collect();
     let mut k = 0usize;
-    for r in &mut t.rows {
-        r.props.height = Some(72.0);
-        r.props.height_rule = wordcraft_doc::props::HeightRule::Exact;
-        for c in &mut r.cells {
-            let content = if from_rec {
-                let rec = address_block(s, k);
-                k += 1;
-                if k > s.merge.rows.len() { String::new() } else { rec }
-            } else {
-                text.clone()
+    let mut made = 0usize;
+    for (row, r) in t.rows.iter_mut().zip(&grid_rows) {
+        row.props.height = Some(if r.is_some() { prod.height } else { v_gap });
+        row.props.height_rule = wordcraft_doc::props::HeightRule::Exact;
+        for (cell, c) in row.cells.iter_mut().zip(&grid_cols) {
+            cell.props.width = Some(if c.is_some() { prod.width } else { h_gap });
+            let (Some(r), Some(c)) = (r, c) else { continue };
+            let content = match single {
+                Some((sr, sc)) if (sr, sc) != (r + 1, c + 1) => String::new(),
+                _ if from_rec => {
+                    let rec = if k < s.merge.rows.len() { address_block(s, k) } else { String::new() };
+                    k += 1;
+                    rec
+                }
+                _ => text.clone(),
             };
-            c.props.valign = wordcraft_doc::props::VAlign::Center;
-            c.blocks = content
+            if !content.is_empty() {
+                made += 1;
+            }
+            cell.props.valign = Some(wordcraft_doc::props::VAlign::Center);
+            cell.blocks = content
                 .split('\n')
+                .take(20)
                 .map(|l| {
                     let mut p = Paragraph::with_text(l, CharProps::default()).styled("NoSpacing");
                     p.props.align = Some(Align::Left);
@@ -821,7 +1426,7 @@ fn labels(s: &mut Session, v: &Value) -> CmdResult {
     s.set_document(d);
     s.path = None;
     let _ = Pos::body(0, 0);
-    Ok(json!({"labels": rows * cols}))
+    Ok(json!({"labels": if single.is_some() { 1 } else { rows * cols }, "filled": made, "product": prod.id}))
 }
 
 #[cfg(test)]
@@ -926,7 +1531,10 @@ mod tests {
         assert_eq!(s.merge.kind, "directory", "a rejected kind leaves the current one");
         assert!(matches!(s.run("mailings.editRecipients", &json!({})), Err(CmdError::Disabled(_))));
         s.run("mailings.recipients", &json!({"csv": "Name\nAda"})).unwrap();
-        assert_eq!(s.run("mailings.editRecipients", &json!({})).unwrap(), json!({"headers": ["Name"], "rows": [["Ada"]]}));
+        assert_eq!(
+            s.run("mailings.editRecipients", &json!({})).unwrap(),
+            json!({"headers": ["Name"], "rows": [["Ada"]], "records": 1, "rules": [], "sort": []})
+        );
     }
 
     fn merged_text(rule: Option<Value>, rows: Value) -> String {
@@ -1022,5 +1630,280 @@ mod tests {
         assert!(s.doc.last_section.page_w > s.doc.last_section.page_h);
         s.run("mailings.labels", &json!({"text": "Hello"})).unwrap();
         assert!(s.doc.plain_text(StoryRef::Body).matches("Hello").count() == 30);
+    }
+
+    /// #407: Envelopes adds an envelope section of the chosen size before the letter; Labels
+    /// lays out a sheet of the chosen product, or a single label at a row and column.
+    #[test]
+    fn envelope_sizes_add_to_document_and_label_products() {
+        let mut s = Session::new(Document::from_text("Dear Jo,"));
+        let r = s.run("mailings.envelopes", &json!({"delivery": "Jo Doe\n1 Main St", "return": "Me", "size": "C5", "add": true})).unwrap();
+        assert_eq!((r["width"].as_f64().map(|w| w.round()), r["height"].as_f64().map(|h| h.round())), (Some(649.0), Some(459.0)));
+        let secs = s.doc.sections();
+        assert_eq!(secs.len(), 2, "an envelope section of its own");
+        assert!(secs[0].1.landscape && (secs[0].1.page_w - 649.1).abs() < 0.1);
+        let text = s.doc.plain_text(StoryRef::Body);
+        assert!(text.starts_with("Me") && text.contains("1 Main St") && text.trim_end().ends_with("Dear Jo,"), "{text}");
+        assert!(s.run("mailings.envelopes", &json!({"size": "Envelope X"})).is_err());
+
+        let r = s.run("mailings.labels", &json!({"text": "Ada", "product": "a4-2x7"})).unwrap();
+        assert_eq!(r["labels"], 14);
+        assert!((s.doc.last_section.page_w - 595.3).abs() < 0.1, "A4 sheet");
+        let Some(Block::Table(t)) = s.doc.body.first().map(|b| &**b) else { panic!("no table") };
+        assert_eq!((t.rows.len(), t.grid.len()), (7, 3), "two label columns and the gap between");
+        assert_eq!(s.doc.plain_text(StoryRef::Body).matches("Ada").count(), 14);
+        let r = s.run("mailings.labels", &json!({"text": "Bo", "product": "letter-3x10", "single": {"row": 2, "col": 3}})).unwrap();
+        assert_eq!(r["filled"], 1);
+        let Some(Block::Table(t)) = s.doc.body.first().map(|b| &**b) else { panic!("no table") };
+        // Row 2, column 3 (grid column 5: label, gap, label, gap, label).
+        let cell = t.rows.get(1).and_then(|r| r.cells.get(4)).and_then(|c| c.blocks.first());
+        assert!(matches!(cell.map(|b| &**b), Some(Block::Para(p)) if p.text == "Bo"));
+        assert!(s.run("mailings.labels", &json!({"product": "nope"})).is_err());
+    }
+
+    fn b64(b: &[u8]) -> String {
+        super::super::insert::base64_encode(b)
+    }
+
+    /// #778: a CSV saved by a Chinese-locale spreadsheet is GBK, not UTF-8; one saved as
+    /// "Unicode text" is UTF-16 with tabs. Both read as the characters they hold.
+    #[test]
+    fn recipient_lists_in_legacy_and_utf16_encodings() {
+        let text = "物料编号,送检日期,检验日期,批号,数量\nPLND0119,2024/4/16,2024/4/16,4164001,12\nE655,2024/4/17,2024/4/17,4174001,1\n";
+        let (gbk, _, bad) = encoding_rs::GBK.encode(text);
+        assert!(!bad && std::str::from_utf8(&gbk).is_err());
+        let mut s = Session::new(Document::new());
+        let r = s.run("mailings.recipients", &json!({"path": "list.csv", "data": b64(&gbk)})).unwrap();
+        assert_eq!(r["fields"], json!(["物料编号", "送检日期", "检验日期", "批号", "数量"]));
+        assert_eq!(s.merge.rows[1], ["E655", "2024/4/17", "2024/4/17", "4174001", "1"]);
+        // Big5 (Traditional Chinese) and Shift_JIS too.
+        for (enc, t) in [
+            (encoding_rs::BIG5, "姓名,城市\n陳大文,臺北市\n林小明,高雄市\n"),
+            (encoding_rs::SHIFT_JIS, "氏名,住所\n山田太郎,東京都\n鈴木花子,大阪府\n"),
+        ] {
+            let (b, _, _) = enc.encode(t);
+            s.run("mailings.recipients", &json!({"data": b64(&b)})).unwrap();
+            assert_eq!(s.merge.headers.join(","), t.lines().next().unwrap(), "{}", enc.name());
+            assert_eq!(s.merge.rows[0].join(","), t.lines().nth(1).unwrap(), "{}", enc.name());
+        }
+        // UTF-16 LE with BOM, tab-separated.
+        let mut u16le = vec![0xFF, 0xFE];
+        for u in "姓名\t城市\r\n张三\t北京\r\n".encode_utf16() {
+            u16le.extend_from_slice(&u.to_le_bytes());
+        }
+        s.run("mailings.recipients", &json!({"path": "list.txt", "data": b64(&u16le)})).unwrap();
+        assert_eq!(s.merge.headers, ["姓名", "城市"]);
+        assert_eq!(s.merge.rows, [["张三", "北京"]]);
+        // An explicit encoding wins over detection; an unknown one is a params error.
+        let (sj, _, _) = encoding_rs::SHIFT_JIS.encode("名前\n田中\n");
+        s.run("mailings.recipients", &json!({"data": b64(&sj), "encoding": "shift_jis"})).unwrap();
+        assert_eq!(s.merge.rows, [["田中"]]);
+        assert!(matches!(s.run("mailings.recipients", &json!({"data": b64(&sj), "encoding": "klingon"})), Err(CmdError::Params(_))));
+        // Plain UTF-8 and Windows-1252 still read as before.
+        s.run("mailings.recipients", &json!({"data": b64(b"Name\nJos\xE9\n")})).unwrap();
+        assert_eq!(s.merge.rows, [["José"]]);
+    }
+
+    /// #778: legacy Excel 97–2003 workbooks are recipient lists; a CSV named .xls reads as text.
+    #[test]
+    fn recipients_from_an_xls_workbook() {
+        let row = |r: &[&str]| r.iter().map(|c| c.to_string()).collect::<Vec<_>>();
+        let book = wordcraft_formats::sheet::xls_fixture(&[(
+            "收件人",
+            vec![row(&["姓名", "城市", "数量"]), row(&["张三", "北京", "12"]), row(&["李四", "上海", "2"])],
+        )])
+        .unwrap();
+        let mut s = Session::new(Document::new());
+        let r = s.run("mailings.recipients", &json!({"path": "名单.xls", "data": b64(&book)})).unwrap();
+        assert_eq!(r, json!({"fields": ["姓名", "城市", "数量"], "records": 2, "sheet": "收件人"}));
+        assert_eq!(s.merge.rows[1], ["李四", "上海", "2"]);
+        // Detected by content without a name.
+        assert_eq!(s.run("mailings.recipients", &json!({"data": b64(&book)})).unwrap()["records"], 2);
+        let r = s.run("mailings.recipients", &json!({"path": "export.xls", "data": b64(b"Name\tCity\nAda\tLondon\n")})).unwrap();
+        assert_eq!(r["fields"], json!(["Name", "City"]));
+        let e = s.run("mailings.recipients", &json!({"path": "export.xls", "data": b64(b"<html><table><tr><td>x</td></tr></table></html>")}));
+        assert!(matches!(e, Err(CmdError::Failed(m)) if m.contains("web page")));
+        // #1287: an Excel 2003 XML spreadsheet named .xls says what it is.
+        let xml = b"<?xml version=\"1.0\"?>\n<Workbook xmlns=\"urn:schemas-microsoft-com:office:spreadsheet\"></Workbook>";
+        let e = s.run("mailings.recipients", &json!({"path": "export.xls", "data": b64(xml)}));
+        assert!(matches!(e, Err(CmdError::Failed(m)) if m.contains("XML spreadsheet")));
+        assert!(
+            s.run("mailings.recipients", &json!({"path": "junk.xls", "data": b64(&[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1, 0, 1])})).is_err()
+        );
+        assert!(super::is_spreadsheet_name("a.XLS") && super::is_spreadsheet_name("b.ods") && !super::is_spreadsheet_name("c.csv"));
+        assert!(super::RECIPIENT_EXTENSIONS.contains(&"xls"));
+    }
+
+    fn people() -> Session {
+        let mut s = Session::new(Document::new());
+        s.run(
+            "mailings.recipients",
+            &json!({"csv": "Name,City,Age,Email\nAda,London,36,ada@x.org\nAlan,Wilmslow,41,\nGrace,New York,85,grace@navy.mil\nKatherine,Hampton,101,\nLinus,Helsinki,9,linus@kernel.org"}),
+        )
+        .unwrap();
+        s
+    }
+
+    fn names(s: &Session) -> Vec<String> {
+        s.merge.rows.iter().map(|r| r[0].clone()).collect()
+    }
+
+    fn filter(s: &mut Session, rules: Value) -> Vec<String> {
+        s.run("mailings.filterRecipients", &json!({"rules": rules})).unwrap();
+        names(s)
+    }
+
+    /// #778: Edit Recipient List › Filter: every comparison, numbers as numbers, And / Or.
+    #[test]
+    fn filter_recipients_comparisons_and_joins() {
+        let mut s = people();
+        assert_eq!(filter(&mut s, json!([{"field": "city", "op": "equal", "value": "london"}])), ["Ada"]);
+        assert_eq!(filter(&mut s, json!([{"field": "City", "op": "<>", "value": "London"}])), ["Alan", "Grace", "Katherine", "Linus"]);
+        // 9 < 36 as numbers, though "9" > "36" as text.
+        assert_eq!(filter(&mut s, json!([{"field": "Age", "op": "less", "value": "36"}])), ["Linus"]);
+        assert_eq!(filter(&mut s, json!([{"field": "Age", "op": "greater", "value": "41"}])), ["Grace", "Katherine"]);
+        assert_eq!(filter(&mut s, json!([{"field": "Age", "op": "lessOrEqual", "value": 36}])), ["Ada", "Linus"]);
+        assert_eq!(filter(&mut s, json!([{"field": "Age", "op": ">=", "value": "85"}])), ["Grace", "Katherine"]);
+        assert_eq!(filter(&mut s, json!([{"field": "Email", "op": "blank"}])), ["Alan", "Katherine"]);
+        assert_eq!(filter(&mut s, json!([{"field": "Email", "op": "isNotBlank"}])), ["Ada", "Grace", "Linus"]);
+        assert_eq!(filter(&mut s, json!([{"field": "Email", "op": "contains", "value": ".ORG"}])), ["Ada", "Linus"]);
+        assert_eq!(filter(&mut s, json!([{"field": "Email", "op": "doesNotContain", "value": "org"}])), ["Alan", "Grace", "Katherine"]);
+        // And binds tighter than Or: (Email blank And Age > 50) Or City = London.
+        let r = json!([
+            {"field": "Email", "op": "blank"},
+            {"field": "Age", "op": "greater", "value": "50", "join": "and"},
+            {"field": "City", "op": "equal", "value": "London", "join": "or"}
+        ]);
+        assert_eq!(filter(&mut s, r), ["Ada", "Katherine"]);
+        let r = s
+            .run(
+                "mailings.filterRecipients",
+                &json!({"rules": [{"field": "Age", "op": "less", "value": 50}, {"field": "City", "op": "contains", "value": "on", "join": "and"}]}),
+            )
+            .unwrap();
+        assert_eq!(r["records"], 1);
+        assert_eq!(r["of"], 5);
+        assert_eq!(r["rules"][1], json!({"field": "City", "op": "contains", "value": "on", "join": "and"}));
+        // {} clears.
+        assert_eq!(s.run("mailings.filterRecipients", &json!({})).unwrap()["records"], 5);
+        // Bad rules are params errors and leave the filter alone.
+        filter(&mut s, json!([{"field": "City", "op": "equal", "value": "Hampton"}]));
+        for bad in [
+            json!({"rules": [{"field": "Nope", "op": "equal", "value": "x"}]}),
+            json!({"rules": [{"field": "City", "op": "resembles", "value": "x"}]}),
+            json!({"rules": [{"field": "City", "join": "xor"}]}),
+            json!({"rules": [{"op": "equal"}]}),
+            json!({"rules": "City = London"}),
+            json!({"rules": [], "sort": [{"field": "Nope"}]}),
+        ] {
+            assert!(matches!(s.run("mailings.filterRecipients", &bad), Err(CmdError::Params(_))), "{bad}");
+        }
+        assert_eq!(names(&s), ["Katherine"]);
+        // Loading another list clears the filter.
+        s.run("mailings.recipients", &json!({"csv": "Name\nA\nB"})).unwrap();
+        assert_eq!(names(&s), ["A", "B"]);
+        assert!(s.merge.filter.is_empty());
+    }
+
+    /// #778: Sort Recipients: by one or more columns, numbers as numbers, ties in list order.
+    #[test]
+    fn sort_recipients() {
+        let mut s = people();
+        s.run("mailings.sortRecipients", &json!({"field": "Age", "descending": true})).unwrap();
+        assert_eq!(names(&s), ["Katherine", "Grace", "Alan", "Ada", "Linus"]);
+        s.run("mailings.sortRecipients", &json!({"sort": [{"field": "Email"}, {"field": "Name", "descending": true}]})).unwrap();
+        assert_eq!(names(&s), ["Katherine", "Alan", "Ada", "Grace", "Linus"]);
+        // Filter and sort together; a filter call without `sort` keeps the sort.
+        s.run("mailings.filterRecipients", &json!({"rules": [{"field": "Age", "op": "greater", "value": 20}], "sort": [{"field": "City"}]})).unwrap();
+        assert_eq!(names(&s), ["Katherine", "Ada", "Grace", "Alan"]);
+        s.run("mailings.filterRecipients", &json!({"rules": [{"field": "Age", "op": "less", "value": 90}]})).unwrap();
+        assert_eq!(names(&s), ["Linus", "Ada", "Grace", "Alan"]);
+        s.run("mailings.sortRecipients", &json!({})).unwrap();
+        assert_eq!(names(&s), ["Ada", "Alan", "Grace", "Linus"]);
+        // Edit Recipient List shows every record, and editing keeps the filter.
+        let r = s.run("mailings.editRecipients", &json!({})).unwrap();
+        assert_eq!(r["rows"].as_array().unwrap().len(), 5);
+        assert_eq!(r["records"], 4);
+        let mut rows: Vec<Value> = r["rows"].as_array().unwrap().clone();
+        rows.push(json!(["Margaret", "Boston", "88", ""]));
+        s.run("mailings.editRecipients", &json!({"fields": ["Name", "City", "Age", "Email"], "rows": rows})).unwrap();
+        assert_eq!(names(&s), ["Ada", "Alan", "Grace", "Linus", "Margaret"]);
+        assert_eq!(s.merge.filter.len(), 1);
+        // Removing the filtered field drops its rule.
+        s.run("mailings.editRecipients", &json!({"fields": ["Name"], "rows": [["X"], ["Y"]]})).unwrap();
+        assert!(s.merge.filter.is_empty());
+        assert_eq!(names(&s), ["X", "Y"]);
+    }
+
+    /// #1287: an Edit Recipient List that fails to load keeps the list's filter and sort.
+    #[test]
+    fn failed_edit_recipients_keeps_filter_and_sort() {
+        let mut s = people();
+        s.run("mailings.filterRecipients", &json!({"rules": [{"field": "Age", "op": "greater", "value": 20}], "sort": [{"field": "City"}]})).unwrap();
+        let before = names(&s);
+        // Array rows without `fields` fail to load.
+        let e = s.run("mailings.editRecipients", &json!({"rows": [["X", "Y"]]}));
+        assert!(matches!(e, Err(CmdError::Params(_))));
+        assert_eq!(s.merge.filter.len(), 1);
+        assert_eq!(s.merge.sort.len(), 1);
+        assert_eq!(names(&s), before);
+        assert_eq!(s.run("mailings.editRecipients", &json!({})).unwrap()["rules"].as_array().map(Vec::len), Some(1));
+    }
+
+    /// Review fix for #885: sorting a column that mixes numbers and text is a total order
+    /// (numbers first, numerically; then text; ties keep list order) and never panics.
+    #[test]
+    fn sort_mixed_number_and_text_column() {
+        let headers = vec!["Id".to_string()];
+        let rows = |vals: &[&str]| vals.iter().map(|v| vec![v.to_string()]).collect::<Vec<_>>();
+        let sorted = |rows: &[Vec<String>], desc: bool| {
+            let order = select_records(&headers, rows, &[], &[SortKey { field: "Id".into(), descending: desc }]);
+            order.iter().map(|&i| rows[i][0].clone()).collect::<Vec<_>>()
+        };
+        let r = rows(&["1a", "9", "10", "b", "2"]);
+        assert_eq!(sorted(&r, false), ["2", "9", "10", "1a", "b"]);
+        assert_eq!(sorted(&r, true), ["b", "1a", "10", "9", "2"]);
+        // Equal keys stay in list order.
+        let r = rows(&["x", "1", "X", "1.0", ""]);
+        assert_eq!(sorted(&r, false), ["1", "1.0", "", "x", "X"]);
+        // A long mixed column (where an inconsistent comparator makes `sort_by` panic).
+        let vals: Vec<String> = (0..400)
+            .map(|i| match i % 4 {
+                0 => format!("{}", (i * 37) % 101),
+                1 => format!("{}a", (i * 13) % 17),
+                2 => format!("{}", (i * 7) % 23),
+                _ => format!("Z{}", i % 11),
+            })
+            .collect();
+        let r: Vec<Vec<String>> = vals.iter().map(|v| vec![v.clone()]).collect();
+        let out = sorted(&r, false);
+        assert!(out.windows(2).all(|w| compare_cells(&w[0], &w[1]) != std::cmp::Ordering::Greater));
+    }
+
+    /// #778: preview, Finish & Merge and labels use only the filtered records, in sort order; a
+    /// filter matching nothing leaves nothing to merge.
+    #[test]
+    fn merge_uses_only_filtered_records_in_sort_order() {
+        let mut s = people();
+        s.run("mailings.insertField", &json!({"field": "Name"})).unwrap();
+        s.run("mailings.filterRecipients", &json!({"rules": [{"field": "Email", "op": "notBlank"}], "sort": [{"field": "Age", "descending": true}]}))
+            .unwrap();
+        s.run("mailings.preview", &json!({"value": true})).unwrap();
+        assert!(s.doc.plain_text(StoryRef::Body).contains("Grace"));
+        s.run("mailings.next", &json!({})).unwrap();
+        assert!(s.doc.plain_text(StoryRef::Body).contains("Ada"));
+        assert_eq!(s.run("mailings.next", &json!({})).unwrap()["of"], 3);
+        assert!(s.run("mailings.findRecipient", &json!({"text": "Alan"})).is_err());
+        let r = s.run("mailings.finish", &json!({})).unwrap();
+        assert_eq!(r["records"], 3);
+        let t = s.doc.plain_text(StoryRef::Body);
+        let (g, a, l) = (t.find("Grace").unwrap(), t.find("Ada").unwrap(), t.find("Linus").unwrap());
+        assert!(g < a && a < l, "{t}");
+        assert!(!t.contains("Alan") && !t.contains("Katherine"), "{t}");
+        let mut s = people();
+        s.run("mailings.filterRecipients", &json!({"rules": [{"field": "City", "op": "equal", "value": "Atlantis"}]})).unwrap();
+        assert!(s.merge.rows.is_empty());
+        assert!(s.run("mailings.finish", &json!({})).is_err());
+        assert!(s.run("mailings.editRecipients", &json!({})).is_ok());
     }
 }

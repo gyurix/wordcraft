@@ -8,10 +8,10 @@ use wordcraft_doc::props::{
     Align, Border, BorderStyle, Borders, CharProps, HeightRule, Highlight, LineSpacing, NumRef, ParaProps, Rgb, RowProps, TabAlign, TabLeader,
     TabStop, TableLook, TextColor, TextDirection, Underline, VAlign, VMerge, VertAlign,
 };
-use wordcraft_doc::section::{Columns, DocGrid, DocGridType, LineNumberRestart, LineNumbering, NumFormat, SectionProps, SectionStart};
+use wordcraft_doc::section::{Columns, DocGrid, DocGridType, LineNumberRestart, LineNumbering, NumFormat, PageVAlign, SectionProps, SectionStart};
 use wordcraft_doc::styles::{Style, StyleKind};
 use wordcraft_doc::table::{Cell, Table};
-use wordcraft_doc::{Block, Blocks, Comment, Document, InlineObject, Paragraph, PartKind, Revision, RevisionKind, Watermark, para_block};
+use wordcraft_doc::{Block, Blocks, Comment, Document, InlineObject, Paragraph, PartKind, Revision, RevisionKind, Source, Watermark, para_block};
 
 fn rt(doc: &Document) -> Document {
     let bytes = wordcraft_docx::write(doc).expect("write");
@@ -56,6 +56,8 @@ fn every_char_prop_round_trips() {
     let all = CharProps {
         style: Some("Strong".into()),
         font: Some("Georgia".into()),
+        // The symbol's own font: the run is written as `w:sym` characters (#2036).
+        sym_font: Some("Wingdings".into()),
         size: Some(10.5),
         bold: Some(true),
         italic: Some(false),
@@ -75,19 +77,49 @@ fn every_char_prop_round_trips() {
         scale: Some(150.0),
         position: Some(3.0),
         kern: Some(8.0),
+        ligatures: Some(wordcraft_doc::props::Ligatures { standard: true, historical: true, ..Default::default() }),
         outline: Some(true),
         shadow: Some(true),
         emboss: Some(false),
         engrave: Some(true),
+        // WordArt effects ([MS-DOCX] w14 run properties).
+        text_effects: Some(Box::new(wordcraft_doc::wordart::TextEffects {
+            fill: Some(wordcraft_doc::wordart::TextFill::Gradient {
+                stops: vec![
+                    wordcraft_doc::wordart::GradStop { pos: 0.0, color: Rgb(0x15, 0x60, 0x82), transparency: 0.0 },
+                    wordcraft_doc::wordart::GradStop { pos: 100.0, color: Rgb(0xE9, 0x71, 0x32), transparency: 25.0 },
+                ],
+                angle: 90.0,
+            }),
+            outline: Some(wordcraft_doc::wordart::TextOutline { color: Some(Rgb(0x0E, 0x28, 0x41)), width: 1.5, transparency: 0.0 }),
+            shadow: Some(wordcraft_doc::effects::Shadow {
+                color: Rgb::BLACK,
+                transparency: 60.0,
+                blur: 4.0,
+                distance: 3.0,
+                angle: 45.0,
+                rot_with_shape: false,
+            }),
+            glow: Some(wordcraft_doc::effects::Glow { color: Rgb(0x0F, 0x9E, 0xD5), size: 5.0, transparency: 40.0 }),
+            reflection: Some(wordcraft_doc::wordart::Reflection::default()),
+        })),
         lang: Some("fr-FR".into()),
         no_proof: Some(true),
         rtl: Some(false),
         cs: Some(true),
         font_cs: Some("B Nazanin".into()),
+        font_ea: Some("宋体".into()),
         size_cs: Some(13.0),
         bold_cs: Some(false),
         italic_cs: Some(true),
         lang_bidi: Some("fa-IR".into()),
+        east_asian_layout: Some(wordcraft_doc::props::EastAsianLayout {
+            id: Some(3),
+            combine: Some(true),
+            combine_brackets: Some(wordcraft_doc::props::CombineBrackets::Square),
+            vert: Some(false),
+            vert_compress: Some(true),
+        }),
         link: None,
         ins: None,
         del: None,
@@ -114,10 +146,16 @@ fn every_para_prop_round_trips() {
         indent_left: Some(36.0),
         indent_right: Some(18.0),
         indent_first: Some(-18.0),
+        indent_left_chars: Some(1.5),
+        indent_right_chars: Some(0.0),
+        indent_first_chars: Some(-1.0),
         space_before: Some(6.0),
         space_after: Some(12.0),
+        space_before_auto: Some(true),
+        space_after_auto: Some(false),
         line_spacing: Some(LineSpacing::Multiple(1.5)),
         contextual_spacing: Some(true),
+        mirror_indents: Some(true),
         keep_next: Some(true),
         keep_lines: Some(false),
         page_break_before: Some(true),
@@ -137,6 +175,23 @@ fn every_para_prop_round_trips() {
         suppress_line_numbers: Some(true),
         bidi: Some(false),
         drop_cap: None,
+        drop_cap_margin: None,
+        drop_cap_distance: None,
+        drop_cap_font: None,
+        frame: Some(wordcraft_doc::props::TextFrame {
+            w: Some(144.0),
+            h: Some(36.0),
+            h_exact: true,
+            x: 0.0,
+            y: 12.0,
+            x_align: Some("right".into()),
+            y_align: None,
+            h_anchor: "margin".into(),
+            v_anchor: "text".into(),
+            wrap: "around".into(),
+            h_space: 9.0,
+            v_space: 0.0,
+        }),
         kinsoku: Some(false),
         word_wrap: Some(false),
         overflow_punct: Some(false),
@@ -187,6 +242,8 @@ fn styles_and_lists_round_trip() {
         quick: true,
         hidden: false,
         builtin: false,
+        locked: true,
+        default: false,
         table: None,
     });
     d.styles.upsert(Style {
@@ -235,14 +292,14 @@ fn tables_with_merges_round_trip() {
     t.props.look = TableLook { header_row: true, total_row: true, banded_rows: false, first_column: false, last_column: true, banded_columns: true };
     t.props.shading = Some(Rgb(1, 1, 1));
     t.props.caption = Some("Sales".into());
-    t.rows[0].props = RowProps { height: Some(20.0), height_rule: HeightRule::Exact, header: true, cant_split: true, fmt_change: None };
+    t.rows[0].props = RowProps { height: Some(20.0), height_rule: HeightRule::Exact, header: true, cant_split: true, ..Default::default() };
     t.rows[1].props = RowProps { height: Some(15.0), height_rule: HeightRule::AtLeast, ..Default::default() };
     t.merge(0, 0, 0, 1); // horizontal
     t.merge(1, 2, 2, 2); // vertical
     {
         let c = &mut t.rows[1].cells[0];
         c.props.shading = Some(Rgb(0xFF, 0, 0));
-        c.props.valign = VAlign::Bottom;
+        c.props.valign = Some(VAlign::Bottom);
         c.props.text_direction = TextDirection::Up;
         c.props.no_wrap = true;
         c.props.margins = Some([2.0, 3.0, 4.0, 5.0]);
@@ -278,8 +335,12 @@ fn sections_headers_footers_round_trip() {
     let mut d = Document::new();
     let page = |instr: &str| {
         let mut p = Paragraph::with_text("Page ", CharProps::default());
-        p.insert_object(5, InlineObject::Field { instr: instr.into(), result: "1".into(), locked: false, code: false }, &CharProps::default())
-            .unwrap();
+        p.insert_object(
+            5,
+            InlineObject::Field { instr: instr.into(), result: "1".into(), locked: false, dirty: false, code: false, form: String::new() },
+            &CharProps::default(),
+        )
+        .unwrap();
         p
     };
     let h1 = d.add_part(PartKind::Header, vec![para_block(Paragraph::with_text("Header one", CharProps::default()))]);
@@ -290,7 +351,7 @@ fn sections_headers_footers_round_trip() {
         title_page: true,
         page_num_start: Some(3),
         page_num_format: NumFormat::UpperRoman,
-        valign: VAlign::Center,
+        valign: PageVAlign::Center,
         page_borders: Some(Borders::box_(Border::single(1.0))),
         line_numbers: Some(LineNumbering { count_by: 5, start: 1, distance: 18.0, restart: LineNumberRestart::Section }),
         gutter: 18.0,
@@ -326,7 +387,10 @@ fn sections_headers_footers_round_trip() {
     assert_eq!(part_text(&r, secs[0].1.headers.first), "First page header");
     assert_eq!(secs[0].1.headers.default, secs[1].1.headers.default, "shared header part stays shared");
     let fp = r.parts.get(&secs[0].1.footers.default.unwrap()).unwrap().blocks[0].as_para().unwrap();
-    assert_eq!(fp.objects, vec![InlineObject::Field { instr: "PAGE".into(), result: "1".into(), locked: false, code: false }]);
+    assert_eq!(
+        fp.objects,
+        vec![InlineObject::Field { instr: "PAGE".into(), result: "1".into(), locked: false, dirty: false, code: false, form: String::new() }]
+    );
     assert_eq!(part_text(&r, secs[1].1.footers.default), "Page 1");
     assert_eq!(r.parts.get(&secs[0].1.headers.default.unwrap()).unwrap().kind, PartKind::Header);
 }
@@ -427,11 +491,27 @@ fn comments_round_trip() {
     let c1 = d.add_part(PartKind::Comment, vec![para_block(Paragraph::with_text("Done.", CharProps::default()))]);
     d.comments.insert(
         0,
-        Comment { author: "Ann".into(), initials: "A".into(), date: "2026-01-02T03:04:05Z".into(), parent: None, resolved: true, part: c0 },
+        Comment {
+            author: "Ann".into(),
+            initials: "A".into(),
+            date: "2026-01-02T03:04:05Z".into(),
+            parent: None,
+            resolved: true,
+            part: c0,
+            ..Default::default()
+        },
     );
     d.comments.insert(
         1,
-        Comment { author: "Ben".into(), initials: "B".into(), date: "2026-01-03T00:00:00Z".into(), parent: Some(0), resolved: false, part: c1 },
+        Comment {
+            author: "Ben".into(),
+            initials: "B".into(),
+            date: "2026-01-03T00:00:00Z".into(),
+            parent: Some(0),
+            resolved: false,
+            part: c1,
+            ..Default::default()
+        },
     );
     let mut p = Paragraph::with_text("commented text", CharProps::default());
     p.insert_object(0, InlineObject::CommentStart { id: 0 }, &CharProps::default()).unwrap();
@@ -485,6 +565,49 @@ fn table_style_formatting_round_trips() {
     assert_eq!(got.para.space_after, Some(0.0));
     assert_eq!((got.chr.bold, got.chr.color), (Some(true), Some(TextColor::Rgb(Rgb(0xC0, 0, 0)))));
     assert_eq!(got.table.as_ref(), Some(&parts));
+}
+
+/// #714: every table style part (ECMA-376 §17.7.6 `w:tblStylePr` types) keeps its run
+/// formatting, cell shading, cell borders and horizontal and vertical alignment through a save.
+#[test]
+fn every_table_style_part_round_trips() {
+    use wordcraft_doc::styles::{PartFormat, TablePart};
+    let mut d = doc_with(vec![Paragraph::with_text("x", CharProps::default())]);
+    let mut st = Style { id: "Parts".into(), name: "Parts".into(), kind: StyleKind::Table, based_on: Some("TableGrid".into()), ..Default::default() };
+    let aligns = [Align::Left, Align::Center, Align::Right];
+    let valigns = [VAlign::Top, VAlign::Center, VAlign::Bottom];
+    for (i, part) in TablePart::ALL.into_iter().enumerate() {
+        let n = i as u8;
+        let f = PartFormat {
+            chr: CharProps {
+                bold: Some(i % 2 == 0),
+                italic: Some(i % 3 == 0),
+                underline: (i % 4 == 0).then_some(Underline::Single),
+                size: Some(8.0 + i as f32),
+                font: Some(format!("Face {i}")),
+                color: Some(TextColor::Rgb(Rgb(n, 0x20, 0x40))),
+                ..Default::default()
+            },
+            fill: Some(Rgb(0x10 + n, 0x80, 0xF0 - n)),
+            borders: Some(Borders {
+                top: Some(Border { style: BorderStyle::Double, width: 1.5, color: Some(Rgb(n, 0, 0)), space: 0.0 }),
+                bottom: Some(Border::single(0.5 + i as f32 / 4.0)),
+                left: Some(Border { style: BorderStyle::None, width: 0.0, color: None, space: 0.0 }),
+                inside_v: (i % 2 == 1).then(|| Border::single(0.25)),
+                ..Default::default()
+            }),
+            align: aligns.get(i % 3).copied(),
+            v_align: valigns.get(i % 3).copied(),
+        };
+        st.set_table_part(part, f);
+    }
+    d.styles.upsert(st.clone());
+    let r = rt(&d);
+    let got = r.styles.get("Parts").unwrap();
+    for part in TablePart::ALL {
+        assert_eq!(got.table_part(part), st.table_part(part), "{}", part.ooxml());
+    }
+    assert_eq!(got.table, st.table);
 }
 
 #[test]
@@ -597,6 +720,32 @@ fn note_never_references_itself() {
     assert_eq!(part_text(&r, Some(*id)).trim(), "The note.");
 }
 
+/// A note with a custom mark keeps it in the note's own text: a plain run with the mark, not the
+/// `w:footnoteRef` / `w:endnoteRef` placeholder that Word replaces by the automatic number.
+#[test]
+fn custom_note_mark_stays_in_the_note() {
+    let mut d = Document::new();
+    let f = d.add_part(PartKind::Footnote, Vec::new());
+    let e = d.add_part(PartKind::Endnote, Vec::new());
+    for (id, kind) in [(f, NoteKind::Footnote), (e, NoteKind::Endnote)] {
+        let mut note = Paragraph::with_text(" The note.", CharProps::default());
+        note.insert_object(0, InlineObject::NoteRef { kind, id, custom: "*".into() }, &CharProps::default()).unwrap();
+        d.parts.get_mut(&id).unwrap().blocks = vec![para_block(note)];
+    }
+    let mut p = Paragraph::with_text("Text", CharProps::default());
+    p.insert_object(4, InlineObject::NoteRef { kind: NoteKind::Footnote, id: f, custom: "*".into() }, &CharProps::default()).unwrap();
+    let end = p.len();
+    p.insert_object(end, InlineObject::NoteRef { kind: NoteKind::Endnote, id: e, custom: "*".into() }, &CharProps::default()).unwrap();
+    d.body = vec![para_block(p)];
+
+    let bytes = wordcraft_docx::write(&d).expect("write");
+    for (file, mark) in [("word/footnotes.xml", "<w:footnoteRef/>"), ("word/endnotes.xml", "<w:endnoteRef/>")] {
+        let xml = part_xml(&bytes, file);
+        assert!(!xml.contains(mark), "{file}: the custom mark became an automatic number: {xml}");
+        assert!(xml.contains(r#"<w:t xml:space="preserve">*</w:t>"#), "{file}: {xml}");
+    }
+}
+
 /// A note read from a Word file starts with its own number (a reference to itself, from the
 /// `w:footnoteRef` mark). Saving writes that mark back exactly once, with its character style, and
 /// never as a `w:footnoteReference`; reading the saved file gives the same note again.
@@ -658,41 +807,53 @@ fn word_note_mark_round_trips_once() {
 /// or Word shows them as plain text with no Update Table.
 #[test]
 fn toc_field_wraps_its_entries() {
-    let mut head = Paragraph::with_text("Contents", CharProps::default()).styled("TOCHeading");
-    let end = head.len();
-    head.insert_object(
-        end,
-        InlineObject::Field { instr: "TOC \\o \"1-2\" \\h \\z \\u".into(), result: String::new(), locked: false, code: false },
-        &CharProps::default(),
-    )
-    .unwrap();
-    let entries = [("Intro\t1", "TOC1"), ("Detail\t2", "TOC2")];
-    let mut blocks = vec![head];
-    blocks.extend(entries.iter().map(|(t, st)| Paragraph::with_text(t, CharProps::default()).styled(st)));
-    blocks.push(Paragraph::with_text("Body", CharProps::default()));
-    let d = doc_with(blocks);
+    for entries in [&[("Intro\t1", "TOC1")][..], &[("Intro\t1", "TOC1"), ("Detail\t2", "TOC2")][..]] {
+        let mut head = Paragraph::with_text("Contents", CharProps::default()).styled("TOCHeading");
+        let end = head.len();
+        head.insert_object(
+            end,
+            InlineObject::Field {
+                instr: "TOC \\o \"1-2\" \\h \\z \\u".into(),
+                result: String::new(),
+                locked: false,
+                dirty: false,
+                code: false,
+                form: String::new(),
+            },
+            &CharProps::default(),
+        )
+        .unwrap();
+        let mut blocks = vec![head];
+        blocks.extend(entries.iter().map(|(t, st)| Paragraph::with_text(t, CharProps::default()).styled(st)));
+        blocks.push(Paragraph::with_text("Body", CharProps::default()));
+        let d = doc_with(blocks);
 
-    let bytes = wordcraft_docx::write(&d).expect("write");
-    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(&bytes)).unwrap();
-    let mut xml = String::new();
-    std::io::Read::read_to_string(&mut zip.by_name("word/document.xml").unwrap(), &mut xml).unwrap();
-    let sdt = xml.find("<w:sdt>").expect("TOC content control");
-    assert!(xml.contains(r#"<w:docPartGallery w:val="Table of Contents"/>"#), "{xml}");
-    let (begin, fend) = (xml.find(r#"fldCharType="begin""#).unwrap(), xml.find(r#"fldCharType="end""#).unwrap());
-    let last_entry = xml.find("Detail").unwrap();
-    assert!(sdt < xml.find("Contents").unwrap() && xml.find("</w:sdt>").unwrap() < xml.find(">Body<").unwrap(), "{xml}");
-    assert!(begin < xml.find("Intro").unwrap() && fend > last_entry && fend < xml.find("</w:sdt>").unwrap(), "field must span the entries: {xml}");
-    // Word starts the field in the first entry; started in the heading, LibreOffice splits the heading.
-    let heading_end = xml[..xml.find("Intro").unwrap()].rfind("</w:p>").unwrap();
-    assert!(begin > heading_end, "field must start in the first entry, not the heading: {xml}");
+        let bytes = wordcraft_docx::write(&d).expect("write");
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(&bytes)).unwrap();
+        let mut xml = String::new();
+        std::io::Read::read_to_string(&mut zip.by_name("word/document.xml").unwrap(), &mut xml).unwrap();
+        let sdt = xml.find("<w:sdt>").expect("TOC content control");
+        assert!(xml.contains(r#"<w:docPartGallery w:val="Table of Contents"/>"#), "{xml}");
+        let (begin, fend) = (xml.find(r#"fldCharType="begin""#).unwrap(), xml.find(r#"fldCharType="end""#).unwrap());
+        let last_entry = xml.find(entries.last().unwrap().0.split('\t').next().unwrap()).unwrap();
+        assert!(sdt < xml.find("Contents").unwrap() && xml.find("</w:sdt>").unwrap() < xml.find(">Body<").unwrap(), "{xml}");
+        assert!(
+            begin < xml.find("Intro").unwrap() && fend > last_entry && fend < xml.find("</w:sdt>").unwrap(),
+            "field must span the entries: {xml}"
+        );
+        // Word starts the field in the first entry; started in the heading, LibreOffice splits the heading.
+        let heading_end = xml[..xml.find("Intro").unwrap()].rfind("</w:p>").unwrap();
+        assert!(begin > heading_end, "field must start in the first entry, not the heading: {xml}");
 
-    // WordCraft reads its own TOC back unchanged.
-    let r = wordcraft_docx::read(&bytes).expect("read");
-    let ps = paras(&r);
-    assert_eq!(ps.iter().map(|p| p.plain_text()).collect::<Vec<_>>(), ["Contents", "Intro\t1", "Detail\t2", "Body"]);
-    assert!(matches!(ps[0].objects.first(), Some(InlineObject::Field { instr, .. }) if instr.starts_with("TOC")), "{:?}", ps[0].objects);
-    assert!(ps[1].objects.is_empty(), "the field goes back on the heading: {:?}", ps[1].objects);
-    assert_eq!(ps[1].props.style.as_deref(), Some("TOC1"));
+        // WordCraft reads its own TOC back unchanged.
+        let r = wordcraft_docx::read(&bytes).expect("read");
+        let ps = paras(&r);
+        let expected: Vec<_> = std::iter::once("Contents").chain(entries.iter().map(|(t, _)| *t)).chain(std::iter::once("Body")).collect();
+        assert_eq!(ps.iter().map(|p| p.plain_text()).collect::<Vec<_>>(), expected);
+        assert!(matches!(ps[0].objects.first(), Some(InlineObject::Field { instr, .. }) if instr.starts_with("TOC")), "{:?}", ps[0].objects);
+        assert!(ps[1].objects.is_empty(), "the field goes back on the heading: {:?}", ps[1].objects);
+        assert_eq!(ps[1].props.style.as_deref(), Some("TOC1"));
+    }
 }
 
 /// Table Layout › Text Direction (#226): each direction is written as Word's `w:textDirection`
@@ -736,13 +897,21 @@ fn toc_field_skips_nested_stories() {
             story: Some(story),
             freeform: None,
             effects: Default::default(),
+            extra: Default::default(),
         }
     };
     let mut head = Paragraph::with_text("Contents", CharProps::default()).styled("TOCHeading");
     let end = head.len();
     head.insert_object(
         end,
-        InlineObject::Field { instr: "TOC \\o \"1-1\" \\h \\z \\u".into(), result: String::new(), locked: false, code: false },
+        InlineObject::Field {
+            instr: "TOC \\o \"1-1\" \\h \\z \\u".into(),
+            result: String::new(),
+            locked: false,
+            dirty: false,
+            code: false,
+            form: String::new(),
+        },
         &CharProps::default(),
     )
     .unwrap();
@@ -781,7 +950,12 @@ fn tracked_changes_round_trip() {
     let p = para_runs(&[("kept ", CharProps::default()), ("added\t", ins.clone()), ("removed", del.clone()), ("gone", both.clone())]);
     let mut p = p;
     let end = p.len();
-    p.insert_object(end, InlineObject::Field { instr: "DATE".into(), result: "today".into(), locked: false, code: false }, &del).unwrap();
+    p.insert_object(
+        end,
+        InlineObject::Field { instr: "DATE".into(), result: "today".into(), locked: false, dirty: false, code: false, form: String::new() },
+        &del,
+    )
+    .unwrap();
     d.body = vec![para_block(p.clone())];
     let r = rt(&d);
     assert_eq!(r.revisions, d.revisions);
@@ -828,9 +1002,16 @@ fn tracked_paragraph_marks_round_trip() {
 fn fields_and_special_chars_round_trip() {
     let mut p = Paragraph::with_text("a\tb\nc\u{000C}d\u{000E}e\u{2011}f\u{00AD}g  spaced  ", CharProps::default());
     let fields = [
-        InlineObject::Field { instr: "PAGE".into(), result: "4".into(), locked: false, code: false },
-        InlineObject::Field { instr: "DATE \\@ \"M/d/yyyy\"".into(), result: "1/2/2026".into(), locked: true, code: false },
-        InlineObject::Field { instr: "NUMPAGES".into(), result: String::new(), locked: false, code: false },
+        InlineObject::Field { instr: "PAGE".into(), result: "4".into(), locked: false, dirty: false, code: false, form: String::new() },
+        InlineObject::Field {
+            instr: "DATE \\@ \"M/d/yyyy\"".into(),
+            result: "1/2/2026".into(),
+            locked: true,
+            dirty: false,
+            code: false,
+            form: String::new(),
+        },
+        InlineObject::Field { instr: "NUMPAGES".into(), result: String::new(), locked: false, dirty: false, code: false, form: String::new() },
     ];
     for f in &fields {
         let end = p.len();
@@ -841,6 +1022,74 @@ fn fields_and_special_chars_round_trip() {
     assert_eq!(got.text, p.text);
     assert_eq!(got.objects, p.objects);
     assert_eq!(got.runs, p.runs);
+}
+
+/// The `document.xml` of a written package.
+fn document_xml(bytes: &[u8]) -> String {
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let mut xml = String::new();
+    std::io::Read::read_to_string(&mut zip.by_name("word/document.xml").unwrap(), &mut xml).unwrap();
+    xml
+}
+
+/// #877: a field begin marker's `w:dirty` (the cached result is stale; Word refreshes it on
+/// open) survives a round trip, and a field without the flag doesn't gain one. Generators that
+/// can't paginate (pandoc-style pipelines, python-docx templates) set the flag instead of a result.
+#[test]
+fn field_dirty_flag_round_trips() {
+    let mut p = Paragraph::with_text("", CharProps::default());
+    for instr in ["PAGE", "DATE"] {
+        let end = p.len();
+        p.insert_object(
+            end,
+            InlineObject::Field { instr: instr.into(), result: "7".into(), locked: false, dirty: false, code: false, form: String::new() },
+            &CharProps::default(),
+        )
+        .unwrap();
+    }
+    let bytes = wordcraft_docx::write(&doc_with(vec![p])).expect("write");
+    // Another producer marks the first field's begin as dirty.
+    let xml = document_xml(&bytes);
+    let marked = xml.replacen(r#"<w:fldChar w:fldCharType="begin"/>"#, r#"<w:fldChar w:fldCharType="begin" w:dirty="true"/>"#, 1);
+    assert_ne!(&marked, &xml, "the written begin marker must be bare: {xml}");
+    let r = wordcraft_docx::read(&replace_part(&bytes, "word/document.xml", marked.as_bytes())).expect("read");
+    let out = document_xml(&wordcraft_docx::write(&r).expect("write"));
+    assert_eq!(out.matches("w:dirty").count(), 1, "the dirty field keeps its flag, the other gains none: {out}");
+    assert!(out.contains(r#"<w:fldChar w:fldCharType="begin" w:dirty="true"/>"#), "{out}");
+}
+
+/// #877: a TOC imported as a range field keeps `w:dirty` through a round trip — the flag sits on
+/// the begin marker Word rebuilds the field from (#878's fixture shape: a placeholder result).
+#[test]
+fn range_toc_dirty_flag_round_trips() {
+    let mut toc = Paragraph::new();
+    toc.insert_object(0, InlineObject::FieldStart { instr: r#"TOC \o "1-3" \h \z \u"#.into(), locked: false, dirty: false }, &CharProps::default())
+        .unwrap();
+    let end = toc.len();
+    toc.insert_text(end, "Placeholder: update fields (F9).", &CharProps::default()).unwrap();
+    let end = toc.len();
+    toc.insert_object(end, InlineObject::FieldEnd, &CharProps::default()).unwrap();
+    let mut blocks = vec![toc];
+    for (t, style) in [("Alpha", Some("Heading1")), ("Body text.", None), ("Beta", Some("Heading2")), ("Gamma", Some("Heading1"))] {
+        let mut h = Paragraph::with_text(t, CharProps::default());
+        h.props.style = style.map(str::to_string);
+        blocks.push(h);
+    }
+    let bytes = wordcraft_docx::write(&doc_with(blocks)).expect("write");
+    let xml = document_xml(&bytes);
+    let marked = xml.replacen(r#"<w:fldChar w:fldCharType="begin"/>"#, r#"<w:fldChar w:fldCharType="begin" w:dirty="true"/>"#, 1);
+    assert_ne!(&marked, &xml, "the written begin marker must be bare: {xml}");
+    let marked = replace_part(&bytes, "word/document.xml", marked.as_bytes());
+    let r = wordcraft_docx::read(&marked).expect("read");
+    // Still the imported shape: a range field holding the placeholder as ordinary content.
+    assert!(matches!(paras(&r)[0].objects.first(), Some(InlineObject::FieldStart { .. })), "{:?}", paras(&r)[0].objects);
+    assert!(paras(&r)[0].objects.last().is_some_and(|o| matches!(o, InlineObject::FieldEnd)));
+    assert_eq!(paras(&r)[0].plain_text(), "Placeholder: update fields (F9).");
+    let out = document_xml(&wordcraft_docx::write(&r).expect("write"));
+    assert_eq!(out.matches("w:dirty").count(), 1, "the TOC keeps its flag: {out}");
+    let (begin, placeholder) = (out.find("fldCharType=\"begin\"").unwrap(), out.find("Placeholder").unwrap());
+    let (separate, end) = (out.find("fldCharType=\"separate\"").unwrap(), out.find("fldCharType=\"end\"").unwrap());
+    assert!(begin < separate && separate < placeholder && placeholder < end, "the placeholder stays the field's result: {out}");
 }
 
 #[test]
@@ -859,6 +1108,7 @@ fn shapes_textboxes_equations_dropcaps_round_trip() {
         story: Some(story),
         freeform: None,
         effects: Default::default(),
+        extra: Default::default(),
     };
     let star = InlineObject::Shape {
         kind: ShapeKind::Star,
@@ -871,6 +1121,7 @@ fn shapes_textboxes_equations_dropcaps_round_trip() {
         story: None,
         freeform: None,
         effects: Default::default(),
+        extra: Default::default(),
     };
     let eq = InlineObject::Equation { linear: "x=(-b±√(b^2-4ac))/2a".into(), display: false, math: Default::default() };
     let mut p = Paragraph::with_text("shapes ", CharProps::default());
@@ -942,6 +1193,7 @@ fn groups_round_trip() {
             glow: None,
             soft_edge: Some(2.5),
         },
+        extra: Default::default(),
     };
     let tb = InlineObject::Shape {
         kind: ShapeKind::TextBox,
@@ -954,6 +1206,7 @@ fn groups_round_trip() {
         story: Some(story),
         freeform: None,
         effects: Default::default(),
+        extra: Default::default(),
     };
     let float = Float { wrap: Wrap::Square, h_rel: Anchor::Column, v_rel: Anchor::Paragraph, x: 20.0, y: 10.0, dist: 9.0, ..Default::default() };
     let group = InlineObject::Group {
@@ -1015,6 +1268,7 @@ fn drawing_canvas_round_trips() {
         story: None,
         effects: Default::default(),
         freeform: None,
+        extra: Default::default(),
     };
     let style = CanvasStyle { fill: Some(Rgb(0xF0, 0xF4, 0xFF)), stroke: Some(Rgb(0x20, 0x40, 0x80)), stroke_width: 1.5 };
     let canvas = InlineObject::Group {
@@ -1062,6 +1316,7 @@ fn rotated_drawing_canvas_round_trips() {
         story: None,
         effects: Default::default(),
         freeform: None,
+        extra: Default::default(),
     };
     let canvas = |float: Float| InlineObject::Group {
         w: 200.0,
@@ -1097,6 +1352,28 @@ fn rotated_drawing_canvas_round_trips() {
 }
 
 #[test]
+fn table_contextual_spacing_compatibility_flag_round_trips() {
+    for mode in [11, 12, 14, 15] {
+        for allow in [false, true] {
+            let mut d = Document::new();
+            d.settings.compat_mode = mode;
+            d.settings.allow_space_of_same_style_in_table = allow;
+            let r = rt(&d);
+            assert_eq!(r.settings.allow_space_of_same_style_in_table, allow);
+            assert_eq!(r.settings.compat_mode, mode);
+            if allow {
+                let bytes = wordcraft_docx::write(&d).unwrap();
+                let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+                let mut xml = String::new();
+                std::io::Read::read_to_string(&mut zip.by_name("word/settings.xml").unwrap(), &mut xml).unwrap();
+                // CT_Compat requires the boolean option before compatSetting.
+                assert!(xml.find("<w:allowSpaceOfSameStyleInTable").unwrap() < xml.find("<w:compatSetting").unwrap());
+            }
+        }
+    }
+}
+
+#[test]
 fn compatibility_mode_round_trips() {
     // New documents are Word 2013+ documents; an older file keeps its mode, so saving it doesn't
     // change how Word lays it out.
@@ -1108,6 +1385,63 @@ fn compatibility_mode_round_trips() {
     }
 }
 
+/// Tools › Templates and Add-ins: the attached template (an external relationship of the settings
+/// part) and "Automatically update document styles" (`w:linkStyles`) round-trip, written in the
+/// schema's order (after `w:mirrorMargins`, before `w:trackRevisions`).
+#[test]
+fn attached_template_and_link_styles_round_trip() {
+    let mut d = Document::new();
+    d.settings.attached_template = Some("file:///C:/Templates/Report & Co.dotx".into());
+    d.settings.link_styles = true;
+    d.settings.mirror_margins = true;
+    d.settings.track_changes = true;
+    let bytes = wordcraft_docx::write(&d).expect("write");
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(&bytes)).unwrap();
+    let mut xml = String::new();
+    std::io::Read::read_to_string(&mut zip.by_name("word/settings.xml").unwrap(), &mut xml).unwrap();
+    let at = |tag: &str| xml.find(tag).unwrap_or_else(|| panic!("{tag} missing: {xml}"));
+    assert!(at("<w:mirrorMargins") < at("<w:attachedTemplate"));
+    assert!(at("<w:attachedTemplate") < at("<w:linkStyles"));
+    assert!(at("<w:linkStyles") < at("<w:trackRevisions"));
+    let mut rels = String::new();
+    std::io::Read::read_to_string(&mut zip.by_name("word/_rels/settings.xml.rels").unwrap(), &mut rels).unwrap();
+    assert!(rels.contains("relationships/attachedTemplate") && rels.contains("TargetMode=\"External\""), "{rels}");
+
+    let r = wordcraft_docx::read(&bytes).expect("read");
+    assert_eq!(r.settings.attached_template.as_deref(), Some("file:///C:/Templates/Report & Co.dotx"));
+    assert!(r.settings.link_styles);
+
+    // Detached: neither element nor relationship is written.
+    let plain = rt(&Document::new());
+    assert_eq!(plain.settings.attached_template, None);
+    assert!(!plain.settings.link_styles);
+}
+
+/// #995: the zoom a document was saved at (`w:zoom`), One Page (`fullPage`) included, is read
+/// and written back.
+#[test]
+fn zoom_round_trips() {
+    let settings = |bytes: &[u8]| {
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        let mut xml = String::new();
+        std::io::Read::read_to_string(&mut zip.by_name("word/settings.xml").unwrap(), &mut xml).unwrap();
+        xml
+    };
+    let plain = wordcraft_docx::write(&Document::new()).unwrap();
+    let xml = settings(&plain);
+    assert!(xml.contains(r#"<w:zoom w:percent="100"/>"#), "{xml}");
+    for (zoom, written) in [
+        (r#"<w:zoom w:val="fullPage" w:percent="62"/>"#, r#"<w:zoom w:val="fullPage" w:percent="62"/>"#),
+        (r#"<w:zoom w:percent="75%"/>"#, r#"<w:zoom w:percent="75"/>"#),
+        (r#"<w:zoom w:val="bestFit" w:percent="99999"/>"#, r#"<w:zoom w:val="bestFit" w:percent="500"/>"#),
+        (r#"<w:zoom w:val="sideways" w:percent="80"/>"#, r#"<w:zoom w:percent="80"/>"#),
+    ] {
+        let file = replace_part(&plain, "word/settings.xml", xml.replace(r#"<w:zoom w:percent="100"/>"#, zoom).as_bytes());
+        let back = settings(&wordcraft_docx::write(&wordcraft_docx::read(&file).unwrap()).unwrap());
+        assert!(back.contains(written), "{zoom}: {back}");
+    }
+}
+
 #[test]
 fn settings_core_theme_round_trip() {
     let mut d = Document::new();
@@ -1116,6 +1450,10 @@ fn settings_core_theme_round_trip() {
     d.settings.even_odd_headers = true;
     d.settings.mirror_margins = true;
     d.settings.auto_hyphenation = true;
+    // Hyphenation Options (#407): zone, words in capitals, consecutive hyphens.
+    d.settings.hyphenation_zone = 27.0;
+    d.settings.hyphenate_caps = false;
+    d.settings.consecutive_hyphen_limit = 2;
     d.settings.page_color = Some(Rgb(250, 240, 230));
     d.settings.major_font = "Cambria".into();
     d.settings.minor_font = "Calibri".into();
@@ -1143,10 +1481,173 @@ fn settings_core_theme_round_trip() {
     let r = rt(&d);
     assert_eq!(r.settings, d.settings);
     assert_eq!(r.core, d.core);
-    // Watermarks aren't stored in DOCX by this crate (yet).
+    // #1290: the watermark is written as a VML text shape in the headers and read back.
     let mut w = d.clone();
     w.settings.watermark = Some(Watermark::default());
-    assert_eq!(rt(&w).settings.watermark, None);
+    assert_eq!(rt(&w).settings.watermark, w.settings.watermark);
+}
+
+fn part_xml(bytes: &[u8], name: &str) -> String {
+    let mut z = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let mut xml = String::new();
+    std::io::Read::read_to_string(&mut z.by_name(name).unwrap(), &mut xml).unwrap();
+    xml
+}
+
+/// Header parts in the document, by id.
+fn header_ids(doc: &Document) -> Vec<u32> {
+    doc.parts.iter().filter(|(_, p)| p.kind == PartKind::Header).map(|(id, _)| *id).collect()
+}
+
+/// #1290: a watermark round-trips through Word's VML text shape: text, font, colour, diagonal and
+/// semitransparent, defaults or not.
+#[test]
+fn watermark_roundtrips() {
+    for wm in [
+        Watermark::default(),
+        Watermark {
+            text: "Riservato & <interno>".into(),
+            font: "Georgia".into(),
+            color: Rgb(0x80, 0x10, 0x20),
+            diagonal: false,
+            semitransparent: false,
+        },
+    ] {
+        let mut d = doc_with(vec![Paragraph::with_text("Body", CharProps::default())]);
+        d.settings.watermark = Some(wm.clone());
+        let r = rt(&d);
+        assert_eq!(r.settings.watermark, Some(wm));
+        assert_eq!(paras(&r).len(), 1, "the body gains nothing");
+    }
+}
+
+/// #1290: a document without headers gains one default header holding only the watermark (an
+/// empty paragraph once read back); saving again neither adds another nor duplicates the shape.
+#[test]
+fn watermark_without_header_gains_one() {
+    let mut d = doc_with(vec![Paragraph::with_text("Body", CharProps::default())]);
+    d.settings.watermark = Some(Watermark::default());
+    let bytes = wordcraft_docx::write(&d).unwrap();
+    let hdr = part_xml(&bytes, "word/header1.xml");
+    assert_eq!(hdr.matches("<v:shape ").count(), 1);
+    assert!(hdr.contains(r#"id="PowerPlusWaterMarkObject1""#) && hdr.contains("rotation:315") && hdr.contains(r#"<v:fill opacity=".5"/>"#));
+    // The text sits between the top and bottom edges: on one line Word gives it no height.
+    assert!(hdr.contains(r#"path="m0,0l21600,0m0,21600l21600,21600e""#));
+    assert!(part_xml(&bytes, "word/document.xml").contains(r#"<w:headerReference w:type="default""#));
+    let r = wordcraft_docx::read(&bytes).unwrap();
+    assert_eq!(r.settings.watermark, d.settings.watermark);
+    let ids = header_ids(&r);
+    assert_eq!(ids.len(), 1);
+    assert_eq!(r.last_section.headers.default, ids.first().copied());
+    let blocks = &r.parts[&ids[0]].blocks;
+    assert_eq!(blocks.len(), 1);
+    let p = blocks[0].as_para().unwrap();
+    assert!(p.text.is_empty() && p.objects.is_empty(), "the shape leaves nothing behind: {p:?}");
+    // Second generation: stable.
+    let r2 = rt(&r);
+    assert_eq!(r2.settings.watermark, d.settings.watermark);
+    assert_eq!(header_ids(&r2).len(), 1);
+    assert_eq!(r2.parts[&header_ids(&r2)[0]].blocks.len(), 1);
+}
+
+/// #1290: a header keeps its own text, and the watermark goes into its first paragraph (no extra
+/// line). Each header part carries the shape; footers don't.
+#[test]
+fn watermark_joins_existing_headers() {
+    let mut d = doc_with(vec![Paragraph::with_text("Body", CharProps::default())]);
+    let h = d.add_part(PartKind::Header, vec![para_block(Paragraph::with_text("Head", CharProps::default()))]);
+    let hf = d.add_part(PartKind::Header, vec![para_block(Paragraph::with_text("First", CharProps::default()))]);
+    let f = d.add_part(PartKind::Footer, vec![para_block(Paragraph::with_text("Foot", CharProps::default()))]);
+    d.last_section.headers.default = Some(h);
+    d.last_section.headers.first = Some(hf);
+    d.last_section.title_page = true;
+    d.last_section.footers.default = Some(f);
+    d.settings.watermark = Some(Watermark::default());
+    let bytes = wordcraft_docx::write(&d).unwrap();
+    for name in ["word/header1.xml", "word/header2.xml"] {
+        assert_eq!(part_xml(&bytes, name).matches("<v:shape ").count(), 1, "{name}");
+    }
+    assert!(!part_xml(&bytes, "word/footer1.xml").contains("v:shape"));
+    let r = wordcraft_docx::read(&bytes).unwrap();
+    assert_eq!(r.settings.watermark, d.settings.watermark);
+    assert_eq!(header_ids(&r).len(), 2, "no header was added");
+    assert_eq!(part_text(&r, r.last_section.headers.default), "Head");
+    assert_eq!(part_text(&r, r.last_section.headers.first), "First");
+    for id in header_ids(&r) {
+        assert_eq!(r.parts[&id].blocks.len(), 1);
+    }
+}
+
+/// #1290: only the slots the pages show and nothing fills get the watermark's own header: a
+/// later section still links to the earlier one's header, and a title page with no first-page
+/// header gets one.
+#[test]
+fn watermark_header_respects_linking() {
+    let mut d = Document::new();
+    let h = d.add_part(PartKind::Header, vec![para_block(Paragraph::with_text("Head", CharProps::default()))]);
+    let mut s1 = SectionProps::default();
+    s1.headers.default = Some(h);
+    s1.title_page = true;
+    let mut p1 = Paragraph::with_text("One", CharProps::default());
+    p1.section = Some(Box::new(s1));
+    d.body = vec![para_block(p1), para_block(Paragraph::with_text("Two", CharProps::default()))];
+    d.last_section.title_page = true;
+    d.settings.watermark = Some(Watermark::default());
+    let r = rt(&d);
+    assert_eq!(r.settings.watermark, d.settings.watermark);
+    let secs = r.sections();
+    assert_eq!(part_text(&r, secs[0].1.headers.default), "Head");
+    let first = secs[0].1.headers.first.expect("a first-page header for the watermark");
+    assert_eq!(part_text(&r, Some(first)), "");
+    assert_eq!(secs[1].1.headers, Default::default(), "the second section still links to the first");
+    assert_eq!(header_ids(&r).len(), 2);
+}
+
+/// #1290: a header holding only a table takes the watermark in the paragraph after the table
+/// (one every story ends with), so it gains no line.
+#[test]
+fn watermark_in_table_only_header() {
+    let mut d = doc_with(vec![Paragraph::with_text("Body", CharProps::default())]);
+    let t = Table::new(1, 2, 400.0);
+    let h = d.add_part(PartKind::Header, vec![Arc::new(Block::Table(t))]);
+    d.last_section.headers.default = Some(h);
+    let blocks = |d: &Document| d.parts[&d.last_section.headers.default.unwrap()].blocks.len();
+    let plain = blocks(&rt(&d));
+    d.settings.watermark = Some(Watermark::default());
+    let r = rt(&d);
+    assert_eq!(r.settings.watermark, d.settings.watermark);
+    assert_eq!(blocks(&r), plain);
+}
+
+/// #1290: with different odd and even pages, a document with only a default header gains an
+/// even-page header for the watermark; a later section stays linked to both.
+#[test]
+fn watermark_even_pages_header() {
+    let mut d = Document::new();
+    let h = d.add_part(PartKind::Header, vec![para_block(Paragraph::with_text("Head", CharProps::default()))]);
+    let mut s1 = SectionProps::default();
+    s1.headers.default = Some(h);
+    let mut p1 = Paragraph::with_text("One", CharProps::default());
+    p1.section = Some(Box::new(s1));
+    d.body = vec![para_block(p1), para_block(Paragraph::with_text("Two", CharProps::default()))];
+    d.settings.even_odd_headers = true;
+    d.settings.watermark = Some(Watermark::default());
+    let r = rt(&d);
+    assert_eq!(r.settings.watermark, d.settings.watermark);
+    let secs = r.sections();
+    assert_eq!(part_text(&r, secs[0].1.headers.default), "Head");
+    assert!(secs[0].1.headers.even.is_some() && secs[0].1.headers.first.is_none());
+    assert_eq!(secs[1].1.headers, Default::default());
+}
+
+/// #1290: a blank watermark isn't written (it wouldn't read back), and adds no header.
+#[test]
+fn blank_watermark_writes_nothing() {
+    let mut d = doc_with(vec![Paragraph::with_text("Body", CharProps::default())]);
+    d.settings.watermark = Some(Watermark { text: "  ".into(), ..Watermark::default() });
+    let r = rt(&d);
+    assert_eq!(r.settings.watermark, None);
+    assert!(header_ids(&r).is_empty());
 }
 
 /// A document that uses everything, for second-generation stability checks.
@@ -1190,6 +1691,21 @@ fn kitchen_sink() -> Document {
     blocks.push(Arc::new(Block::Table(t)));
     blocks.push(para_block(Paragraph::new()));
     d.body = blocks;
+    d.sources.push(Source {
+        tag: "Sink2026".into(),
+        kind: "book".into(),
+        author: "Author, First".into(),
+        title: "Title".into(),
+        year: "2026".into(),
+        editor: "Editor, Chief".into(),
+        edition: "3rd".into(),
+        issue: "2".into(),
+        month: "08".into(),
+        day: "24".into(),
+        accessed: "2026-08-25".into(),
+        doi: "10.1234/sink.2026".into(),
+        ..Default::default()
+    });
     d
 }
 
@@ -1205,7 +1721,23 @@ fn second_generation_is_stable() {
     assert_eq!(d2.revisions, d1.revisions);
     assert_eq!(d2.settings, d1.settings);
     assert_eq!(d2.media, d1.media);
+    assert_eq!(d2.sources, d1.sources);
     assert_eq!(d2, d1);
+}
+
+/// A Word XML Document (Flat OPC) carries the same package as a .docx: reading it back gives
+/// what the .docx round trip gives, pictures included (#548).
+#[test]
+fn flat_opc_round_trip_equals_docx() {
+    let d = kitchen_sink();
+    let xml = wordcraft_docx::write_flat(&d).expect("write flat");
+    let text = std::str::from_utf8(&xml).expect("utf-8");
+    assert!(text.starts_with("<?xml") && text.contains("<?mso-application progid=\"Word.Document\"?>"));
+    assert!(text.contains("pkg:name=\"/word/document.xml\"") && text.contains("<pkg:binaryData>"));
+    assert_eq!(wordcraft_docx::sniff_xml(&xml), wordcraft_docx::XmlKind::FlatOpc);
+    let back = wordcraft_docx::read_xml(&xml).expect("read flat");
+    assert_eq!(back, rt(&d));
+    assert_eq!(back.media.len(), 1);
 }
 
 #[test]
@@ -1291,6 +1823,7 @@ fn self_showing_text_box_saves_bounded() {
         story: Some(id),
         freeform: None,
         effects: Default::default(),
+        extra: Default::default(),
     };
     for _ in 0..30 {
         d.insert_object(
@@ -1373,7 +1906,8 @@ fn list_level_overrides_round_trip() {
 }
 
 /// Ink strokes and freeform shapes are written as DrawingML custom geometry (`a:custGeom`,
-/// `a:moveTo`/`a:lnTo`) in floating drawings and read back with their points, pen and opacity.
+/// `a:moveTo`/`a:lnTo`) in floating drawings and read back with their points, pen, opacity and
+/// drawing order.
 #[test]
 fn ink_and_freeforms_round_trip_as_custom_geometry() {
     use wordcraft_doc::freeform::{FreePath, Freeform, InkTool};
@@ -1388,8 +1922,15 @@ fn ink_and_freeforms_round_trip_as_custom_geometry() {
         story: None,
         freeform: Some(Arc::new(f)),
         effects: Default::default(),
+        extra: Default::default(),
     };
-    let pen = shape(None, 2.0, Wrap::InFrontOfText, Freeform::ink(InkTool::Pen, 60.0, 20.0, vec![[1.0, 1.0], [30.0, 19.0], [59.0, 4.0]]));
+    // The pen stroke was the seventh drawn: Ink Replay's order comes back too.
+    let pen = shape(
+        None,
+        2.0,
+        Wrap::InFrontOfText,
+        Freeform { order: Some(7), ..Freeform::ink(InkTool::Pen, 60.0, 20.0, vec![[1.0, 1.0], [30.0, 19.0], [59.0, 4.0]]) },
+    );
     let marker = shape(None, 12.0, Wrap::BehindText, Freeform::ink(InkTool::Highlighter, 80.0, 12.0, vec![[6.0, 6.0], [74.0, 6.0]]));
     let triangle = Freeform {
         w: 40.0,
@@ -1441,6 +1982,7 @@ fn shape_effects_round_trip() {
         story: None,
         freeform: None,
         effects,
+        extra: Default::default(),
     };
     let mut p = Paragraph::with_text("x", CharProps::default());
     p.insert_object(1, shape, &CharProps::default()).unwrap();
@@ -1516,6 +2058,7 @@ fn rotation_and_flips_round_trip() {
         story: None,
         freeform: None,
         effects: Default::default(),
+        extra: Default::default(),
     };
     let square = Float { wrap: Wrap::Square, ..Default::default() };
     let tri = shape(ShapeKind::Triangle, Float { rot: 90.0, flip_h: true, ..square.clone() });
@@ -1572,6 +2115,7 @@ fn rotated_group_and_shadow_rotation_round_trip() {
         story: None,
         freeform: None,
         effects: ShapeEffects { shadow: Some(Shadow { rot_with_shape, ..Default::default() }), ..Default::default() },
+        extra: Default::default(),
     };
     let group = InlineObject::Group {
         w: 120.0,
@@ -1607,6 +2151,154 @@ fn rotated_group_and_shadow_rotation_round_trip() {
 }
 
 #[test]
+fn bibliography_sources_round_trip() {
+    let mut d = Document::new();
+    d.sources.push(Source {
+        tag: "Rivera2021".into(),
+        kind: "book".into(),
+        author: "Rivera, Alex; Chen, Mei".into(),
+        title: "Shared Spaces".into(),
+        year: "2021".into(),
+        publisher: "Harbor Books".into(),
+        city: "Portland".into(),
+        editor: "Johnson, Robert".into(),
+        edition: "2nd".into(),
+        month: "10".into(),
+        day: "15".into(),
+        ..Default::default()
+    });
+    d.sources.push(Source {
+        tag: "Smith2023".into(),
+        kind: "article".into(),
+        author: "Smith, John David".into(),
+        title: "Modern Typography".into(),
+        year: "2023".into(),
+        journal: "Design Quarterly".into(),
+        volume: "12".into(),
+        pages: "45-60".into(),
+        url: "https://example.com/typo".into(),
+        issue: "4".into(),
+        doi: "10.1000/182".into(),
+        ..Default::default()
+    });
+    d.sources.push(Source {
+        tag: "WebSite2024".into(),
+        kind: "website".into(),
+        author: "Solo".into(),
+        title: "Open Fonts".into(),
+        year: "2024".into(),
+        url: "https://example.org".into(),
+        accessed: "2024-05-15".into(),
+        ..Default::default()
+    });
+    d.sources.push(Source {
+        tag: "Chapter2025".into(),
+        kind: "bookSection".into(),
+        author: "Lee, Harper".into(),
+        title: "Chapter One".into(),
+        year: "2025".into(),
+        journal: "Anthology of Prose".into(),
+        pages: "1-20".into(),
+        ..Default::default()
+    });
+    d.sources.push(Source {
+        tag: "Misc2026".into(),
+        kind: "other".into(),
+        title: "Archive Manuscript".into(),
+        year: "2026".into(),
+        city: "Oxford".into(),
+        ..Default::default()
+    });
+
+    let bytes = wordcraft_docx::write(&d).expect("write");
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(&bytes)).unwrap();
+
+    // Verify package-root customXml parts exist
+    assert!(zip.by_name("customXml/item1.xml").is_ok());
+    assert!(zip.by_name("customXml/itemProps1.xml").is_ok());
+    assert!(zip.by_name("customXml/_rels/item1.xml.rels").is_ok());
+
+    let mut rels_xml = String::new();
+    std::io::Read::read_to_string(&mut zip.by_name("_rels/.rels").unwrap(), &mut rels_xml).unwrap();
+    assert!(rels_xml.contains("relationships/customXml"), "{rels_xml}");
+    assert!(rels_xml.contains("Target=\"customXml/item1.xml\""), "{rels_xml}");
+
+    let mut ct_xml = String::new();
+    std::io::Read::read_to_string(&mut zip.by_name("[Content_Types].xml").unwrap(), &mut ct_xml).unwrap();
+    assert!(ct_xml.contains("PartName=\"/customXml/item1.xml\""), "{ct_xml}");
+    assert!(ct_xml.contains("PartName=\"/customXml/itemProps1.xml\""), "{ct_xml}");
+
+    let mut item_xml = String::new();
+    std::io::Read::read_to_string(&mut zip.by_name("customXml/item1.xml").unwrap(), &mut item_xml).unwrap();
+    assert!(item_xml.contains("SelectedStyle=\"\\APA.XSL\""), "{item_xml}");
+    assert!(item_xml.contains("StyleName=\"APA\""), "{item_xml}");
+    assert!(item_xml.contains("<b:SourceType>Book</b:SourceType>"), "{item_xml}");
+    assert!(item_xml.contains("<b:SourceType>JournalArticle</b:SourceType>"), "{item_xml}");
+    assert!(item_xml.contains("<b:SourceType>InternetSite</b:SourceType>"), "{item_xml}");
+    assert!(item_xml.contains("<b:SourceType>BookSection</b:SourceType>"), "{item_xml}");
+    assert!(item_xml.contains("<b:SourceType>Misc</b:SourceType>"), "{item_xml}");
+    assert!(item_xml.contains("<b:Author><b:Author><b:NameList><b:Person>"), "{item_xml}");
+    assert!(item_xml.contains("<b:Last>Rivera</b:Last><b:First>Alex</b:First>"), "{item_xml}");
+    assert!(item_xml.contains("<b:Last>Smith</b:Last><b:First>John</b:First><b:Middle>David</b:Middle>"), "{item_xml}");
+    assert!(item_xml.contains("<b:Last>Solo</b:Last>"), "{item_xml}");
+    assert!(item_xml.contains("<b:Editor>"), "{item_xml}");
+    assert!(item_xml.contains("<b:Last>Johnson</b:Last><b:First>Robert</b:First>"), "{item_xml}");
+    assert!(item_xml.contains("<b:Edition>2nd</b:Edition>"), "{item_xml}");
+    assert!(item_xml.contains("<b:Month>10</b:Month>"), "{item_xml}");
+    assert!(item_xml.contains("<b:Day>15</b:Day>"), "{item_xml}");
+    assert!(item_xml.contains("<b:Issue>4</b:Issue>"), "{item_xml}");
+    assert!(item_xml.contains("<b:DOI>10.1000/182</b:DOI>"), "{item_xml}");
+    assert!(item_xml.contains("<b:YearAccessed>2024</b:YearAccessed>"), "{item_xml}");
+    assert!(item_xml.contains("<b:MonthAccessed>05</b:MonthAccessed>"), "{item_xml}");
+    assert!(item_xml.contains("<b:DayAccessed>15</b:DayAccessed>"), "{item_xml}");
+    assert!(item_xml.contains("<b:Accessed>2024-05-15</b:Accessed>"), "{item_xml}");
+
+    let back = wordcraft_docx::read(&bytes).expect("read");
+    assert_eq!(back.sources.len(), 5);
+    assert_eq!(back.sources[0].tag, "Rivera2021");
+    assert_eq!(back.sources[0].kind, "book");
+    assert_eq!(back.sources[0].author, "Rivera, Alex; Chen, Mei");
+    assert_eq!(back.sources[0].title, "Shared Spaces");
+    assert_eq!(back.sources[0].year, "2021");
+    assert_eq!(back.sources[0].publisher, "Harbor Books");
+    assert_eq!(back.sources[0].city, "Portland");
+    assert_eq!(back.sources[0].editor, "Johnson, Robert");
+    assert_eq!(back.sources[0].edition, "2nd");
+    assert_eq!(back.sources[0].month, "10");
+    assert_eq!(back.sources[0].day, "15");
+
+    assert_eq!(back.sources[1].tag, "Smith2023");
+    assert_eq!(back.sources[1].kind, "article");
+    assert_eq!(back.sources[1].author, "Smith, John David");
+    assert_eq!(back.sources[1].title, "Modern Typography");
+    assert_eq!(back.sources[1].journal, "Design Quarterly");
+    assert_eq!(back.sources[1].volume, "12");
+    assert_eq!(back.sources[1].pages, "45-60");
+    assert_eq!(back.sources[1].url, "https://example.com/typo");
+    assert_eq!(back.sources[1].issue, "4");
+    assert_eq!(back.sources[1].doi, "10.1000/182");
+
+    assert_eq!(back.sources[2].tag, "WebSite2024");
+    assert_eq!(back.sources[2].kind, "website");
+    assert_eq!(back.sources[2].author, "Solo");
+    assert_eq!(back.sources[2].title, "Open Fonts");
+    assert_eq!(back.sources[2].url, "https://example.org");
+    assert_eq!(back.sources[2].accessed, "2024-05-15");
+
+    assert_eq!(back.sources[3].tag, "Chapter2025");
+    assert_eq!(back.sources[3].kind, "bookSection");
+    assert_eq!(back.sources[3].author, "Lee, Harper");
+    assert_eq!(back.sources[3].title, "Chapter One");
+    assert_eq!(back.sources[3].journal, "Anthology of Prose");
+    assert_eq!(back.sources[3].pages, "1-20");
+
+    assert_eq!(back.sources[4].tag, "Misc2026");
+    assert_eq!(back.sources[4].kind, "other");
+    assert_eq!(back.sources[4].title, "Archive Manuscript");
+    assert_eq!(back.sources[4].city, "Oxford");
+}
+
+#[test]
 fn wrap_polygons_round_trip() {
     use wordcraft_doc::wrap::{WrapPolygon, shape_outline};
     let mut d = Document::new();
@@ -1621,6 +2313,7 @@ fn wrap_polygons_round_trip() {
         story: None,
         effects: Default::default(),
         freeform: None,
+        extra: Default::default(),
     };
     // A hand-edited polygon, including points outside the frame.
     let poly = WrapPolygon::new(true, [(-300, 0), (21_600, 1200), (18_000, 21_900), (0, 21_600)]).map(Arc::new);
@@ -1643,7 +2336,7 @@ fn wrap_polygons_round_trip() {
     let got = paras(&r)[0];
     let floats: Vec<Float> = got.objects.iter().filter_map(|o| o.frame().map(|(_, _, f)| f.clone())).collect();
     assert_eq!(floats[0], edited);
-    let ellipse = WrapPolygon::from_unit(false, &shape_outline(ShapeKind::Ellipse, 80.0, 40.0).unwrap());
+    let ellipse = WrapPolygon::from_unit(false, &shape_outline(ShapeKind::Ellipse, 80.0, 40.0, None).unwrap());
     assert_eq!(floats[1].wrap, Wrap::Through);
     assert_eq!(floats[1].wrap_polygon.as_deref(), ellipse.as_ref());
 }
@@ -1666,7 +2359,7 @@ fn enclosed_characters_round_trip_in_words_structure() {
         let off = p.len();
         p.insert_object(
             off,
-            InlineObject::Field { instr: e.instr(), result: "字".into(), locked: false, code: false },
+            InlineObject::Field { instr: e.instr(), result: "字".into(), locked: false, dirty: false, code: false, form: String::new() },
             &CharProps { size, ..Default::default() },
         )
         .unwrap();
@@ -1744,6 +2437,7 @@ fn wrap_text_sides_round_trip() {
         story: None,
         effects: Default::default(),
         freeform: None,
+        extra: Default::default(),
     };
     let sides =
         [(Wrap::Square, WrapText::Left), (Wrap::Tight, WrapText::Right), (Wrap::Through, WrapText::Largest), (Wrap::Square, WrapText::BothSides)];
@@ -1770,4 +2464,223 @@ fn wrap_text_sides_round_trip() {
     assert_eq!(got, sides);
     // A value outside the schema is no side (read as both sides).
     assert_eq!(WrapText::from_ooxml("middle"), None);
+}
+
+#[test]
+fn alt_text_title_and_decorative_round_trip_for_every_object() {
+    use wordcraft_doc::para::AltText;
+    let mut d = Document::new();
+    let key = d.add_media(tiny_png(), "png");
+    let pic = InlineObject::Image {
+        media: key,
+        w: 100.0,
+        h: 50.0,
+        alt: "A kiln at dusk".into(),
+        float: Float { alt: AltText { title: "Kiln".into(), ..Default::default() }, ..Default::default() },
+        crop: [0.0; 4],
+        ole: None,
+    };
+    let shape = |alt: AltText| InlineObject::Shape {
+        kind: ShapeKind::Ellipse,
+        w: 80.0,
+        h: 40.0,
+        fill: Some(Rgb(1, 2, 3)),
+        stroke: None,
+        stroke_width: 0.0,
+        float: Float { alt, ..Default::default() },
+        story: None,
+        effects: Default::default(),
+        freeform: None,
+        extra: Default::default(),
+    };
+    let described = shape(AltText { text: "Process flow & \"steps\"".into(), ..Default::default() });
+    let decorative = shape(AltText { decorative: true, ..Default::default() });
+    let group = InlineObject::Group {
+        w: 120.0,
+        h: 60.0,
+        float: Float { alt: AltText { text: "Two circles".into(), ..Default::default() }, ..Default::default() },
+        ch_w: 120.0,
+        ch_h: 60.0,
+        children: vec![wordcraft_doc::para::GroupChild { x: 0.0, y: 0.0, obj: shape(AltText { text: "Left circle".into(), ..Default::default() }) }],
+        canvas: None,
+    };
+    let mut p = Paragraph::with_text("objects ", CharProps::default());
+    for o in [pic, described, decorative, group] {
+        let end = p.len();
+        p.insert_object(end, o, &CharProps::default()).unwrap();
+    }
+    let mut t = Table::new(2, 2, 300.0);
+    t.props.caption = Some("Prices".into());
+    t.props.description = Some("Prices by year".into());
+    d.body = vec![para_block(p), Arc::new(Block::Table(t))];
+    let bytes = wordcraft_docx::write(&d).expect("write");
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(&bytes)).unwrap();
+    let mut xml = String::new();
+    std::io::Read::read_to_string(&mut zip.by_name("word/document.xml").unwrap(), &mut xml).unwrap();
+    assert!(xml.contains(r#"{C183D7F6-B498-43B3-948B-1728B52AA6E4}"><adec:decorative xmlns:adec="http://schemas.microsoft.com/office/drawing/2017/decorative" val="1"/>"#), "{xml}");
+    assert!(
+        xml.contains(r#"<w:tblLook "#) && xml.contains(r#"<w:tblCaption w:val="Prices"/><w:tblDescription w:val="Prices by year"/></w:tblPr>"#),
+        "{xml}"
+    );
+    let r = wordcraft_docx::read(&bytes).expect("read");
+    let objs = &paras(&r)[0].objects;
+    let alts: Vec<_> =
+        objs.iter().map(|o| (o.alt_text().to_string(), o.frame().map(|f| f.2.alt.title.clone()).unwrap_or_default(), o.is_decorative())).collect();
+    assert_eq!(
+        alts,
+        [
+            ("A kiln at dusk".into(), "Kiln".into(), false),
+            ("Process flow & \"steps\"".into(), String::new(), false),
+            (String::new(), String::new(), true),
+            ("Two circles".into(), String::new(), false),
+        ]
+    );
+    let InlineObject::Group { children, .. } = &objs[3] else { panic!("{objs:?}") };
+    assert_eq!(children[0].obj.alt_text(), "Left circle");
+    let Some(Block::Table(t)) = r.body.iter().map(|b| &**b).find(|b| matches!(b, Block::Table(_))) else { panic!() };
+    assert_eq!((t.props.caption.as_deref(), t.props.description.as_deref()), (Some("Prices"), Some("Prices by year")));
+}
+
+/// WordArt's warp (`a:prstTxWarp` with its adjust value) and connectors glued to shapes
+/// (`a:stCxn`/`a:endCxn`, with arrowheads) come back as saved; a shape no connector is glued to
+/// loses its drawing id, and hostile values are reduced.
+#[test]
+fn warps_and_glued_connectors_round_trip() {
+    use wordcraft_doc::connector::{ConnEnd, ShapeExtra};
+    use wordcraft_doc::wordart::TextWarp;
+    let mut d = Document::new();
+    let story = d.add_part(PartKind::TextBox, vec![para_block(Paragraph::with_text("Bent", CharProps::default()))]);
+    let float = |x: f32| Float { wrap: Wrap::InFrontOfText, h_rel: Anchor::Column, v_rel: Anchor::Paragraph, x, y: 10.0, ..Default::default() };
+    let shape = |kind, story, extra| InlineObject::Shape {
+        kind,
+        w: 72.0,
+        h: 36.0,
+        fill: None,
+        stroke: Some(Rgb(0, 0, 0)),
+        stroke_width: 1.0,
+        float: float(0.0),
+        story,
+        freeform: None,
+        effects: Default::default(),
+        extra,
+    };
+    let mut warp = TextWarp::new("textArchUp").unwrap();
+    warp.set_adj("adj", 9_000_000);
+    let art = shape(ShapeKind::TextBox, Some(story), ShapeExtra { id: 5, warp: Some(warp), ..Default::default() });
+    let target = shape(ShapeKind::Ellipse, None, ShapeExtra { id: 7, ..Default::default() });
+    let lonely = shape(ShapeKind::Rectangle, None, ShapeExtra { id: 9, ..Default::default() });
+    let link = ShapeExtra { start: Some(ConnEnd { id: 5, site: 3 }), end: Some(ConnEnd { id: 7, site: 2 }), arrow_end: true, ..Default::default() };
+    let mut conn = shape(ShapeKind::ElbowConnector, None, link);
+    if let InlineObject::Shape { float: f, .. } = &mut conn {
+        *f = Float { flip_v: true, ..float(80.0) };
+    }
+    let mut p = Paragraph::with_text("", CharProps::default());
+    for o in [art.clone(), conn.clone(), target.clone(), lonely] {
+        let end = p.len();
+        p.insert_object(end, o, &CharProps::default()).unwrap();
+    }
+    d.body = vec![para_block(p)];
+    let r = rt(&d);
+    let got = &paras(&r)[0].objects;
+    // The glued-to shapes keep their ids, the connector its ends, arrowhead and flip.
+    let extra = |o: &InlineObject| match o {
+        InlineObject::Shape { extra, .. } => extra.clone(),
+        _ => panic!("{o:?}"),
+    };
+    assert_eq!(extra(&got[0]), extra(&art));
+    assert_eq!(extra(&got[1]), extra(&conn));
+    assert!(matches!(&got[1], InlineObject::Shape { kind: ShapeKind::ElbowConnector, float, .. } if float.flip_v));
+    assert_eq!(extra(&got[2]), extra(&target));
+    assert_eq!(extra(&got[3]).id, 0, "nothing is glued to it");
+
+    // Hostile: an unknown warp, a huge adjust value, a glue to a missing shape.
+    let xml = wordcraft_docx::write(&r).unwrap();
+    let mut pkg = zip::ZipArchive::new(std::io::Cursor::new(xml)).unwrap();
+    let mut doc_xml = String::new();
+    std::io::Read::read_to_string(&mut pkg.by_name("word/document.xml").unwrap(), &mut doc_xml).unwrap();
+    let doc_xml = doc_xml
+        .replace("prst=\"textArchUp\"", "prst=\"textNotAWarp\"")
+        .replace("a:stCxn id=\"5\" idx=\"3\"", "a:stCxn id=\"404\" idx=\"99999999999\"");
+    let bytes = replace_part(&wordcraft_docx::write(&r).unwrap(), "word/document.xml", doc_xml.as_bytes());
+    let h = wordcraft_docx::read(&bytes).unwrap();
+    let got = &paras(&h)[0].objects;
+    assert_eq!(extra(&got[0]).warp, None);
+    assert_eq!(extra(&got[1]).start, Some(ConnEnd { id: 404, site: wordcraft_doc::connector::MAX_SITE }));
+}
+
+/// `zip` with part `name` replaced by `data`.
+fn replace_part(zip_bytes: &[u8], name: &str, data: &[u8]) -> Vec<u8> {
+    let mut src = zip::ZipArchive::new(std::io::Cursor::new(zip_bytes)).unwrap();
+    let mut out = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for i in 0..src.len() {
+        let mut f = src.by_index(i).unwrap();
+        let n = f.name().to_string();
+        out.start_file(n.as_str(), zip::write::SimpleFileOptions::default()).unwrap();
+        if n == name {
+            std::io::Write::write_all(&mut out, data).unwrap();
+        } else {
+            std::io::copy(&mut f, &mut out).unwrap();
+        }
+    }
+    out.finish().unwrap().into_inner()
+}
+
+/// A texture or picture page background (`v:background/v:fill`) survives a save (#999): the image
+/// part, its relationship and the fill attributes.
+#[test]
+fn page_background_picture_round_trips() {
+    let mut png = Vec::new();
+    image::RgbaImage::from_pixel(4, 4, image::Rgba([200, 150, 100, 255]))
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+    let mut d = Document::new();
+    d.settings.page_color = Some(Rgb(0xFF, 0xFF, 0xCC));
+    d.media.insert("paper.png".into(), Arc::new(png.clone()));
+    d.settings.page_picture = Some(wordcraft_doc::PagePicture { media: "paper.png".into(), fill_type: "tile".into(), title: "Paper".into() });
+    let r = rt(&d);
+    let pic = r.settings.page_picture.as_ref().expect("picture kept");
+    assert_eq!((pic.fill_type.as_str(), pic.title.as_str()), ("tile", "Paper"));
+    assert_eq!(r.media.get(&pic.media).map(|b| b.as_slice()), Some(png.as_slice()));
+    assert_eq!(r.settings.page_color, d.settings.page_color);
+    // Saved again, it is still there.
+    assert!(rt(&r).settings.page_picture.is_some());
+}
+
+/// #2601: Drop Cap Options — a dropped cap with its lines, distance from the text and font, and
+/// one in the margin, survive a save: `w:framePr w:dropCap="drop|margin" w:lines w:hSpace` on the
+/// letter's own paragraph, the font on the letter's run (ECMA-376 §17.3.1.11). The text after the
+/// letter keeps its own font.
+#[test]
+fn drop_cap_options_round_trip() {
+    let body = CharProps { font: Some("Liberation Serif".into()), ..Default::default() };
+    let mut dropped = Paragraph::with_text("Once upon a time", body.clone());
+    dropped.props.drop_cap = Some(2);
+    dropped.props.drop_cap_distance = Some(6.0);
+    dropped.props.drop_cap_font = Some("Liberation Mono".into());
+    let mut margin = Paragraph::with_text("In the margin", body.clone());
+    margin.props.drop_cap = Some(4);
+    margin.props.drop_cap_margin = Some(true);
+    let d = doc_with(vec![dropped, margin]);
+    let bytes = wordcraft_docx::write(&d).expect("write");
+    let mut z = zip::ZipArchive::new(std::io::Cursor::new(&bytes)).unwrap();
+    let mut xml = String::new();
+    std::io::Read::read_to_string(&mut z.by_name("word/document.xml").unwrap(), &mut xml).unwrap();
+    assert!(xml.contains(r#"w:dropCap="drop" w:lines="2" w:hSpace="120""#), "{xml}");
+    assert!(xml.contains(r#"w:dropCap="margin" w:lines="4""#), "{xml}");
+    assert!(xml.contains(r#"w:ascii="Liberation Mono""#), "the letter's font on its run: {xml}");
+    let r = wordcraft_docx::read(&bytes).expect("read");
+    let got = paras(&r);
+    assert_eq!(got.len(), 2, "each letter merges back into its paragraph");
+    let (a, b) = (&got[0], &got[1]);
+    assert_eq!(a.plain_text(), "Once upon a time");
+    assert_eq!(
+        (a.props.drop_cap, a.props.drop_cap_margin, a.props.drop_cap_distance, a.props.drop_cap_font.as_deref()),
+        (Some(2), None, Some(6.0), Some("Liberation Mono"))
+    );
+    assert!(a.runs.iter().all(|r| r.props.font.as_deref() == Some("Liberation Serif")), "the letter keeps the text's font: {:?}", a.runs);
+    assert_eq!(b.plain_text(), "In the margin");
+    assert_eq!(
+        (b.props.drop_cap, b.props.drop_cap_margin, b.props.drop_cap_distance, b.props.drop_cap_font.as_deref()),
+        (Some(4), Some(true), None, None)
+    );
 }

@@ -1,8 +1,9 @@
 //! Charts (ECMA-376 Part 1 §21.2): the cached data of a `c:chartSpace` drawn as items in points.
 //!
 //! Bar and column (clustered, stacked or 100% stacked), line, area, pie, doughnut and scatter
-//! charts are drawn from the first supported chart type of the plot area. Other chart types draw
-//! nothing. Text widths are estimated ([`CHAR_W`] em a character), so label places are approximate.
+//! charts are drawn from the first supported chart type of the plot area, with their values as
+//! data labels where `c:dLbls` shows them (`c:showVal`). A chart of only other types (radar, stock…)
+//! draws a placeholder: its frame, its title and the type it is. Text widths are estimated ([`CHAR_W`] em a character), so label places are approximate.
 
 use std::f64::consts::{FRAC_PI_2, TAU};
 
@@ -45,20 +46,21 @@ const TEXT: Rgb = Rgb(0x59, 0x59, 0x59);
 const GRID: Rgb = Rgb(0xD9, 0xD9, 0xD9);
 const AXIS: Rgb = Rgb(0xBF, 0xBF, 0xBF);
 
-/// Items for a chart part, sized `w` x `h` points. Empty when nothing supported is in it.
+/// Items for a chart part, sized `w` x `h` points: a placeholder when only unsupported chart
+/// types are in it, empty when there's nothing to draw.
 pub(crate) fn chart_items(space: &El, theme: &[Rgb], w: f32, h: f32) -> Vec<GraphicItem> {
     let mut out = Vec::new();
     if !(w.is_finite() && h.is_finite() && w > 0.0 && h > 0.0) {
         return out;
     }
-    let Some(chart) = Chart::parse(space, theme) else { return out };
+    let Some(chart) = Chart::parse(space, theme) else {
+        placeholder(&mut out, space, theme, w, h);
+        return out;
+    };
     backdrop(&mut out, space, theme, w, h);
     let mut area = Rect { x: PAD, y: PAD, w: (w - 2.0 * PAD).max(1.0), h: (h - 2.0 * PAD).max(1.0) };
     if let Some(t) = &chart.title {
-        let lh = TITLE_SIZE * LINE;
-        text(&mut out, Rect { x: area.x, y: area.y, w: area.w, h: lh }, t, TITLE_SIZE, TextAlign::Center, true);
-        area.y += lh + PAD;
-        area.h = (area.h - lh - PAD).max(1.0);
+        area = title_block(&mut out, t, area);
     }
     if let Some(pos) = chart.legend {
         // Word lists bar series in the order they are drawn: reversed for clustered horizontal bars
@@ -76,6 +78,62 @@ pub(crate) fn chart_items(space: &El, theme: &[Rgb], w: f32, h: f32) -> Vec<Grap
         _ => cartesian(&mut out, &chart, area),
     }
     out
+}
+
+/// The title at the top of `area`; returns the room left under it.
+fn title_block(out: &mut Vec<GraphicItem>, t: &str, area: Rect) -> Rect {
+    let lh = TITLE_SIZE * LINE;
+    text(out, Rect { x: area.x, y: area.y, w: area.w, h: lh }, t, TITLE_SIZE, TextAlign::Center, true);
+    Rect { y: area.y + lh + PAD, h: (area.h - lh - PAD).max(1.0), ..area }
+}
+
+/// A chart whose plot area holds only chart types WordCraft doesn't draw (radar, stock…): its
+/// frame with a light border, its title and a line saying which type it is, so it isn't blank
+/// space. Nothing when the plot area has no chart type at all, or a supported one with nothing
+/// to draw.
+fn placeholder(out: &mut Vec<GraphicItem>, space: &El, theme: &[Rgb], w: f32, h: f32) {
+    let Some(chart) = space.child("c:chart") else { return };
+    let Some(plot) = chart.child("c:plotArea") else { return };
+    if plot.els().any(|e| Kind::of(&e.name).is_some()) {
+        return;
+    }
+    let Some(ty) = plot.els().find(|e| e.name.ends_with("Chart")) else { return };
+    backdrop(out, space, theme, w, h);
+    out.push(GraphicItem::Shape { rect: [0.0, 0.0, w, h], kind: ShapeKind::Rectangle, fill: None, stroke: Some(AXIS), stroke_width: 0.75 });
+    let mut area = Rect { x: PAD, y: PAD, w: (w - 2.0 * PAD).max(1.0), h: (h - 2.0 * PAD).max(1.0) };
+    if let Some(t) = title_of(chart, &read_series(ty, false, theme)) {
+        area = title_block(out, &t, area);
+    }
+    let size = text_size(space);
+    let lh = size * LINE;
+    let msg = format!("{} (not supported yet)", unsupported_name(&ty.name));
+    let line = Rect { x: area.x, y: area.y + ((area.h - lh) / 2.0).max(0.0), w: area.w, h: lh };
+    text(out, line, &clip_text(&msg, area.w, size), size, TextAlign::Center, false);
+}
+
+/// What a placeholder calls a chart type element WordCraft doesn't draw.
+fn unsupported_name(name: &str) -> &'static str {
+    match name {
+        "c:radarChart" => "Radar chart",
+        "c:stockChart" => "Stock chart",
+        "c:bubbleChart" => "Bubble chart",
+        "c:surfaceChart" | "c:surface3DChart" => "Surface chart",
+        "c:ofPieChart" => "Pie of pie chart",
+        "c:bar3DChart" => "3-D bar chart",
+        "c:line3DChart" => "3-D line chart",
+        "c:area3DChart" => "3-D area chart",
+        "c:pie3DChart" => "3-D pie chart",
+        _ => "Chart",
+    }
+}
+
+/// A data label to draw once the chart is: the value at (`x`, `y`), centred there (`inside`, in
+/// white on the fill) or just beside it (above, or right of a horizontal bar's end).
+struct DataLabel {
+    x: f32,
+    y: f32,
+    text: String,
+    inside: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -145,6 +203,11 @@ struct Series {
     fmt: Option<String>,
     /// Format code of the scatter x values' cache.
     x_fmt: Option<String>,
+    /// Data labels on or off for this series (`c:dLbls` of its own), when it says.
+    labels: Option<bool>,
+    /// The values as the file has them, for data labels (`values` become shares in a 100%
+    /// stacked chart); empty when the series shows no labels.
+    raw: Vec<Option<f64>>,
 }
 
 struct Chart {
@@ -206,9 +269,14 @@ impl Chart {
         };
         let mut cats = cats;
         cats.resize(n, String::new());
+        let type_labels = show_values(ty.child("c:dLbls"));
         for s in &mut series {
             s.values.resize(n, None);
             s.xs.resize(n, None);
+            s.labels = Some(s.labels.or(type_labels).unwrap_or(false));
+            if s.labels == Some(true) {
+                s.raw = s.values.clone();
+            }
         }
         if grouping == Grouping::Percent {
             to_percent(&mut series, n);
@@ -329,6 +397,15 @@ fn title_of(chart: &El, series: &[Series]) -> Option<String> {
     chart.child("c:title").and_then(|t| title_text(t).or(auto))
 }
 
+/// Whether a `c:dLbls` shows the values (`None` when there's none, or it doesn't say).
+fn show_values(d: Option<&El>) -> Option<bool> {
+    let d = d?;
+    if d.child("c:delete").and_then(|e| e.attr("val")).is_some_and(truthy) {
+        return Some(false);
+    }
+    d.child("c:showVal").map(|v| v.attr("val").is_none_or(truthy))
+}
+
 fn legend_pos(chart: &El) -> Option<Pos> {
     chart.child("c:legend").map(|l| match l.child("c:legendPos").and_then(|p| p.attr("val")).unwrap_or("r") {
         "l" => Pos::Left,
@@ -370,7 +447,8 @@ impl Series {
                 *slot = c;
             }
         }
-        Series { name, color, line_w, line, values, xs, points, fmt, x_fmt }
+        let labels = show_values(ser.child("c:dLbls"));
+        Series { name, color, line_w, line, values, xs, points, fmt, x_fmt, labels, raw: Vec::new() }
     }
 }
 
@@ -1240,14 +1318,16 @@ fn cartesian(out: &mut Vec<GraphicItem>, c: &Chart, area: Rect) {
     if c.val.grid {
         draw_grid(out, &g, &ax.vticks);
     }
+    let mut labels = Vec::new();
     match c.kind {
-        Kind::Bar => bars(out, c, &g),
-        Kind::Line => lines(out, c, &g),
-        Kind::Area => areas(out, c, &g),
-        Kind::Scatter => draw_scatter(out, c, &g),
+        Kind::Bar => bars(out, c, &g, &mut labels),
+        Kind::Line => lines(out, c, &g, &mut labels),
+        Kind::Area => areas(out, c, &g, &mut labels),
+        Kind::Scatter => draw_scatter(out, c, &g, &mut labels),
         Kind::Pie | Kind::Doughnut => {}
     }
     draw_axes(out, c, &g);
+    draw_data_labels(out, &labels, c.text_size, g.horiz && c.kind == Kind::Bar);
     if !c.val.deleted {
         draw_value_labels(out, c, &g, &ax.vticks, Rect { w: m.left, ..area });
     }
@@ -1367,7 +1447,7 @@ fn x_extent(c: &Chart) -> (f64, f64) {
     if lo.is_finite() && hi.is_finite() { (lo, hi) } else { (0.0, 1.0) }
 }
 
-fn bars(out: &mut Vec<GraphicItem>, c: &Chart, g: &Frame) {
+fn bars(out: &mut Vec<GraphicItem>, c: &Chart, g: &Frame, labels: &mut Vec<DataLabel>) {
     let stacked = c.stacked();
     let slots = if stacked { 1 } else { c.series.len().max(1) };
     let ov = if stacked { 0.0 } else { c.overlap };
@@ -1400,6 +1480,17 @@ fn bars(out: &mut Vec<GraphicItem>, c: &Chart, g: &Frame) {
             let (p0, p1) = (p0.min(p1), p0.max(p1));
             let segs = if g.horiz { rect_segs(p0, a, p1, a + thick) } else { rect_segs(a, p0, a + thick, p1) };
             fill(out, segs, c.point_colour(j, i));
+            if let Some(text) = label_of(s, i) {
+                let mid = a + thick / 2.0;
+                let (x, y) = match (g.horiz, stacked) {
+                    (true, true) => ((p0 + p1) / 2.0, mid),
+                    (false, true) => (mid, (p0 + p1) / 2.0),
+                    // Beyond the bar's end: right of a positive bar, above a positive column.
+                    (true, false) => (if v >= 0.0 { p1 } else { p0 }, mid),
+                    (false, false) => (mid, if v >= 0.0 { p0 } else { p1 }),
+                };
+                labels.push(DataLabel { x, y, text, inside: stacked });
+            }
         }
     }
 }
@@ -1410,7 +1501,7 @@ fn has_values(s: &Series) -> bool {
 }
 
 /// Line series; stacked ones are drawn at the running total of the series up to them.
-fn lines(out: &mut Vec<GraphicItem>, c: &Chart, g: &Frame) {
+fn lines(out: &mut Vec<GraphicItem>, c: &Chart, g: &Frame, labels: &mut Vec<DataLabel>) {
     let mut total = vec![0.0f64; g.n];
     for (j, s) in c.series.iter().enumerate().filter(|(_, s)| has_values(s)) {
         let pts: Vec<Option<(f32, f32)>> = (0..g.n)
@@ -1426,11 +1517,16 @@ fn lines(out: &mut Vec<GraphicItem>, c: &Chart, g: &Frame) {
                 Some((g.cat_x(i), g.val(y)))
             })
             .collect();
+        for (i, p) in pts.iter().enumerate() {
+            if let (Some((x, y)), Some(text)) = (p, label_of(s, i)) {
+                labels.push(DataLabel { x: *x, y: *y, text, inside: false });
+            }
+        }
         stroke(out, runs(pts.into_iter()), c.series_colour(j), s.line_w);
     }
 }
 
-fn areas(out: &mut Vec<GraphicItem>, c: &Chart, g: &Frame) {
+fn areas(out: &mut Vec<GraphicItem>, c: &Chart, g: &Frame, labels: &mut Vec<DataLabel>) {
     let mut base = vec![0.0f64; g.n];
     for (j, s) in c.series.iter().enumerate().filter(|(_, s)| has_values(s)) {
         let vals = (0..g.n).map(|i| s.values.get(i).copied().flatten().unwrap_or(0.0));
@@ -1445,6 +1541,11 @@ fn areas(out: &mut Vec<GraphicItem>, c: &Chart, g: &Frame) {
         }
         segs.push(PathSeg::Close);
         fill(out, segs, c.series_colour(j));
+        for (i, (t, b)) in top.iter().zip(&base).enumerate() {
+            if let Some(text) = label_of(s, i) {
+                labels.push(DataLabel { x: g.cat_x(i), y: g.val((t + b) / 2.0), text, inside: true });
+            }
+        }
         if c.stacked() {
             base = top;
         }
@@ -1452,7 +1553,7 @@ fn areas(out: &mut Vec<GraphicItem>, c: &Chart, g: &Frame) {
 }
 
 /// Scatter series as lines, or as small markers when the series has no line.
-fn draw_scatter(out: &mut Vec<GraphicItem>, c: &Chart, g: &Frame) {
+fn draw_scatter(out: &mut Vec<GraphicItem>, c: &Chart, g: &Frame, labels: &mut Vec<DataLabel>) {
     const MARKER: f32 = 6.0;
     for (j, s) in c.series.iter().enumerate() {
         let pts: Vec<Option<(f32, f32)>> =
@@ -1463,6 +1564,11 @@ fn draw_scatter(out: &mut Vec<GraphicItem>, c: &Chart, g: &Frame) {
                     _ => None,
                 })
                 .collect();
+        for (i, p) in pts.iter().enumerate() {
+            if let (Some((x, y)), Some(text)) = (p, label_of(s, i)) {
+                labels.push(DataLabel { x: *x, y: *y - MARKER / 2.0, text, inside: false });
+            }
+        }
         if s.line {
             stroke(out, runs(pts.iter().copied()), c.series_colour(j), s.line_w);
             continue;
@@ -1485,6 +1591,7 @@ fn pie(out: &mut Vec<GraphicItem>, c: &Chart, area: Rect) {
     let (cx, cy) = ((area.x + area.w / 2.0) as f64, (area.y + area.h / 2.0) as f64);
     let inner = if c.kind == Kind::Doughnut { r * c.hole as f64 } else { 0.0 };
     let mut a = c.first_angle.to_radians();
+    let mut labels = Vec::new();
     for (i, v) in vals.iter().enumerate() {
         if *v <= 0.0 {
             continue;
@@ -1503,7 +1610,56 @@ fn pie(out: &mut Vec<GraphicItem>, c: &Chart, area: Rect) {
         }
         segs.push(PathSeg::Close);
         fill(out, segs, c.point_colour(0, i));
+        if let Some(text) = label_of(s, i) {
+            // Halfway across the ring (pie: two thirds out from the centre).
+            let at = if inner > 0.0 { (r + inner) / 2.0 } else { r * 0.65 };
+            let (x, y) = polar(cx, cy, at, (a + b) / 2.0);
+            labels.push(DataLabel { x: x as f32, y: y as f32, text, inside: true });
+        }
         a = b;
+    }
+    draw_data_labels(out, &labels, c.text_size, false);
+}
+
+/// The data label of point `i` of series `s`, when it shows one: the value as the file has it,
+/// in the series' number format.
+fn label_of(s: &Series, i: usize) -> Option<String> {
+    if s.labels != Some(true) {
+        return None;
+    }
+    let v = s.raw.get(i).copied().flatten()?;
+    let fmt = s.fmt.as_deref().filter(|f| !f.eq_ignore_ascii_case("General"));
+    Some(match fmt {
+        Some(f) => format_value(v, f, 1.0),
+        None => general_value(v),
+    })
+}
+
+/// A value in the `General` format: whole numbers without decimals, others with up to six.
+fn general_value(v: f64) -> String {
+    if v.fract() == 0.0 && v.abs() < 1e15 {
+        return format!("{v:.0}");
+    }
+    let s = format!("{v:.6}");
+    let s = s.trim_end_matches('0').trim_end_matches('.');
+    if s == "-0" { "0".to_string() } else { s.to_string() }
+}
+
+/// Data labels over the drawn chart. Beside labels sit above their point, or right of it for
+/// horizontal bars (`beside_right`).
+fn draw_data_labels(out: &mut Vec<GraphicItem>, labels: &[DataLabel], fs: f32, beside_right: bool) {
+    let lh = fs * LINE;
+    for l in labels {
+        let w = text_w(&l.text, fs) + 4.0;
+        let (rect, align) = if l.inside {
+            (Rect { x: l.x - w / 2.0, y: l.y - lh / 2.0, w, h: lh }, TextAlign::Center)
+        } else if beside_right {
+            (Rect { x: l.x + GAP / 2.0, y: l.y - lh / 2.0, w, h: lh }, TextAlign::Left)
+        } else {
+            (Rect { x: l.x - w / 2.0, y: l.y - lh, w, h: lh }, TextAlign::Center)
+        };
+        let color = if l.inside { Rgb::WHITE } else { TEXT };
+        out.push(GraphicItem::Text { rect: rect.arr(), text: l.text.clone(), size: fs, color, bold: false, align, font: None });
     }
 }
 
@@ -1608,6 +1764,26 @@ mod tests {
     }
 
     #[test]
+    fn data_labels_show_the_values() {
+        let texts = |items: &[GraphicItem]| -> Vec<String> {
+            items.iter().filter_map(|it| if let GraphicItem::Text { text, .. } = it { Some(text.clone()) } else { None }).collect()
+        };
+        let labels = r#"<c:dLbls><c:showLegendKey val="0"/><c:showVal val="1"/></c:dLbls>"#;
+        let plot = format!(
+            r#"<c:barChart><c:barDir val="col"/><c:grouping val="clustered"/>{}{labels}<c:axId val="1"/><c:axId val="2"/></c:barChart><c:catAx><c:axId val="1"/></c:catAx><c:valAx><c:axId val="2"/></c:valAx>"#,
+            ser(0, "North", None, &["Q1", "Q2"], &["4.25", "17"]),
+        );
+        let shown = texts(&chart_items(&space(&plot), &theme(), 300.0, 200.0));
+        assert!(shown.contains(&"4.25".to_string()) && shown.contains(&"17".to_string()), "{shown:?}");
+        let pie = format!(r#"<c:pieChart><c:varyColors val="1"/>{}{labels}</c:pieChart>"#, ser(0, "S", None, &["A", "B"], &["1", "3"]));
+        let shown = texts(&chart_items(&space(&pie), &theme(), 200.0, 150.0));
+        assert!(shown.contains(&"3".to_string()), "{shown:?}");
+        // Without `c:dLbls`, no values are written next to the points.
+        let plain = plot.replace(labels, "");
+        assert!(!texts(&chart_items(&space(&plain), &theme(), 300.0, 200.0)).contains(&"4.25".to_string()));
+    }
+
+    #[test]
     fn pie_draws_one_slice_per_point() {
         let plot =
             format!(r#"<c:pieChart><c:varyColors val="1"/>{}</c:pieChart>"#, ser(0, "Share", None, &["A", "B", "C", "D"], &["50", "25", "15", "10"]));
@@ -1665,10 +1841,27 @@ mod tests {
         assert!(chart_items(&El::default(), &theme(), 100.0, 100.0).is_empty());
     }
 
+    fn texts(items: &[GraphicItem]) -> Vec<&str> {
+        items.iter().filter_map(|it| if let GraphicItem::Text { text, .. } = it { Some(text.as_str()) } else { None }).collect()
+    }
+
     #[test]
-    fn unsupported_chart_types_draw_nothing() {
-        let plot = r#"<c:radarChart><c:ser><c:val><c:numLit><c:ptCount val="1"/><c:pt idx="0"><c:v>1</c:v></c:pt></c:numLit></c:val></c:ser></c:radarChart>"#;
-        assert!(chart_items(&space(plot), &theme(), 100.0, 100.0).is_empty());
+    fn unsupported_chart_types_draw_a_placeholder() {
+        let ser = r#"<c:ser><c:val><c:numLit><c:ptCount val="1"/><c:pt idx="0"><c:v>1</c:v></c:pt></c:numLit></c:val></c:ser>"#;
+        let title = r#"<c:title><c:tx><c:rich><a:p><a:r><a:t>Skills</a:t></a:r></a:p></c:rich></c:tx></c:title>"#;
+        let x = format!(r#"<c:chartSpace {NS}><c:chart>{title}<c:plotArea><c:radarChart>{ser}</c:radarChart></c:plotArea></c:chart></c:chartSpace>"#);
+        let radar = chart_items(&crate::xml::parse(x.as_bytes()).unwrap(), &theme(), 300.0, 200.0);
+        assert_eq!(texts(&radar), ["Skills", "Radar chart (not supported yet)"]);
+        let framed = radar.iter().any(|it| matches!(it, GraphicItem::Shape { rect, stroke: Some(_), .. } if *rect == [0.0, 0.0, 300.0, 200.0]));
+        assert!(framed, "a light border marks the chart's frame: {radar:?}");
+
+        let stock = chart_items(&space(&format!("<c:stockChart>{ser}{ser}{ser}</c:stockChart>")), &theme(), 300.0, 200.0);
+        assert_eq!(texts(&stock), ["Stock chart (not supported yet)"]);
+        let other = chart_items(&space(&format!("<c:fancyChart>{ser}</c:fancyChart>")), &theme(), 300.0, 200.0);
+        assert_eq!(texts(&other), ["Chart (not supported yet)"]);
+        // A supported type in the plot area is drawn, an unsupported one beside it is skipped.
+        let combo = chart_items(&space(&format!("<c:radarChart>{ser}</c:radarChart><c:lineChart>{ser}</c:lineChart>")), &theme(), 300.0, 200.0);
+        assert!(!texts(&combo).iter().any(|t| t.contains("not supported")), "{combo:?}");
     }
 
     /// Chart items for a chart with a legend at `pos` (`r`, `b`…).
