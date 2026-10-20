@@ -2243,7 +2243,7 @@ impl WordApp {
         zotero::show_alert(self, &ctx);
         read_aloud::show(self, &ctx);
         crate::keytips::show(self, &ctx, ui);
-        chrome::window_frame(self, &ctx);
+        chrome::window_frame(self, ui);
         keys::global_shortcuts(self, &ctx);
         self.refocus_after_chrome_click(&ctx);
         if let Some(url) = self.canvas.open_url.take() {

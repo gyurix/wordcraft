@@ -264,12 +264,15 @@ pub fn title_bar(app: &mut WordApp, ui: &mut Ui) {
     egui::Panel::top("title_bar")
         .exact_size(if mac { bar.height } else { 38.0 })
         .frame(egui::Frame::NONE.fill(t.title_bar).inner_margin(egui::Margin { left, right: 10, top: 0, bottom: 0 }))
+        // Keep the title bar and tab strip as one band.
+        .show_separator_line(false)
         .show(ui, |ui| {
             let full = ui.max_rect();
             // Drag the window by the title bar (integrated title bar on macOS).
-            let drag = ui.interact(full, ui.id().with("title_drag"), Sense::click_and_drag());
+            let drag = ui.interact(full, title_drag_id(), Sense::click_and_drag());
             if drag.drag_started() {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                handed_to_os(ui.ctx());
             }
             if drag.double_clicked() {
                 let max = ui.ctx().input(|i| i.viewport().maximized.unwrap_or(false));
@@ -434,18 +437,31 @@ pub fn title_bar(app: &mut WordApp, ui: &mut Ui) {
 const CONTROL_W: f32 = 46.0;
 /// Height of the title bar, and of the window-control buttons.
 const TITLE_H: f32 = 38.0;
-/// How far in from a frameless window's edge the pointer resizes it.
-const RESIZE_BAND: f32 = 5.0;
-/// How far along an edge from a corner the pointer resizes diagonally.
-const RESIZE_CORNER: f32 = 14.0;
+/// Resize-zone thickness along an edge (`RESIZE_EDGE`) and the side of a corner zone (`RESIZE_CORNER`).
+const RESIZE_EDGE: f32 = 8.0;
+const RESIZE_CORNER: f32 = 12.0;
+/// Over another control at the window's edge (a scroll bar) only this outer strip resizes, as in #945.
+const RESIZE_GRIP: f32 = 3.0;
+/// A widget narrower than this on its shorter side is a control, not a background (the canvas).
+const CONTROL_MAX: f32 = 64.0;
 
-/// A frameless window (`WordApp::window_controls`): minimize, maximize/restore and close at the
-/// top right, resizing from the edges and corners, and a hairline border. Drawn above everything,
-/// so the controls stay reachable from Backstage too.
-pub fn window_frame(app: &WordApp, ctx: &egui::Context) {
+/// The title bar's drag area: window chrome, so the resize zones don't yield to it.
+fn title_drag_id() -> egui::Id {
+    egui::Id::new("title_drag")
+}
+
+/// Clears egui's drag state after the window manager takes a move or resize (emilk/egui#7959).
+pub(crate) fn handed_to_os(ctx: &egui::Context) {
+    ctx.stop_dragging();
+    ctx.input_mut(|i| i.pointer = Default::default());
+}
+
+/// Draws controls, border and resize zones for a frameless window.
+pub fn window_frame(app: &WordApp, ui: &mut Ui) {
     if !app.window_controls {
         return;
     }
+    let ctx = &ui.ctx().clone();
     let (maximized, fullscreen) = ctx.input(|i| (i.viewport().maximized.unwrap_or(false), i.viewport().fullscreen.unwrap_or(false)));
     if fullscreen {
         return;
@@ -461,8 +477,8 @@ pub fn window_frame(app: &WordApp, ctx: &egui::Context) {
                 let close = kind == "close";
                 let hot = resp.hovered() || resp.is_pointer_button_down_on();
                 let c = if close && hot {
-                    ui.painter().rect_filled(r, 0.0, egui::Color32::from_rgb(0xC4, 0x2B, 0x1C));
-                    egui::Color32::WHITE
+                    ui.painter().rect_filled(r, 0.0, if resp.is_pointer_button_down_on() { t.close_pressed } else { t.close_hover });
+                    t.on_close
                 } else {
                     if hot {
                         ui.painter().rect_filled(r, 0.0, if resp.is_pointer_button_down_on() { t.pressed } else { t.hover });
@@ -494,6 +510,7 @@ pub fn window_frame(app: &WordApp, ctx: &egui::Context) {
                         tl!("Close")
                     }
                 };
+                resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tip));
                 if resp.on_hover_text(tip).clicked() {
                     ctx.send_viewport_cmd(match kind {
                         "minimize" => ViewportCommand::Minimized(true),
@@ -513,39 +530,60 @@ pub fn window_frame(app: &WordApp, ctx: &egui::Context) {
         Stroke::new(1.0, t.border),
         egui::StrokeKind::Inside,
     );
-    let Some(pos) = ctx.input(|i| i.pointer.latest_pos()) else { return };
-    if !screen.contains(pos) {
+    let layer = egui::LayerId::new(egui::Order::Foreground, egui::Id::new("wc_window_resize"));
+    // The caption buttons keep every press, even at the window's edge.
+    if ctx.pointer_latest_pos().is_some_and(|p| controls.contains(p)) {
         return;
     }
-    let near = |d: f32, band: f32| d < band;
-    let (dl, dr, dt, db) = (pos.x - screen.min.x, screen.max.x - pos.x, pos.y - screen.min.y, screen.max.y - pos.y);
-    let (w, e, n, s) = (near(dl, RESIZE_BAND), near(dr, RESIZE_BAND), near(dt, RESIZE_BAND), near(db, RESIZE_BAND));
-    let (cw, ce, cn, cs) = (near(dl, RESIZE_CORNER), near(dr, RESIZE_CORNER), near(dt, RESIZE_CORNER), near(db, RESIZE_CORNER));
-    let hit = if (n && cw) || (w && cn) {
-        Some((ResizeDirection::NorthWest, CursorIcon::ResizeNorthWest))
-    } else if (n && ce) || (e && cn) {
-        Some((ResizeDirection::NorthEast, CursorIcon::ResizeNorthEast))
-    } else if (s && cw) || (w && cs) {
-        Some((ResizeDirection::SouthWest, CursorIcon::ResizeSouthWest))
-    } else if (s && ce) || (e && cs) {
-        Some((ResizeDirection::SouthEast, CursorIcon::ResizeSouthEast))
-    } else if n {
-        Some((ResizeDirection::North, CursorIcon::ResizeNorth))
-    } else if s {
-        Some((ResizeDirection::South, CursorIcon::ResizeSouth))
-    } else if w {
-        Some((ResizeDirection::West, CursorIcon::ResizeWest))
-    } else if e {
-        Some((ResizeDirection::East, CursorIcon::ResizeEast))
-    } else {
-        None
-    };
-    if let Some((dir, icon)) = hit {
-        ctx.set_cursor_icon(icon);
-        if ctx.input(|i| i.pointer.primary_pressed()) {
+    let zones = ui.new_child(egui::UiBuilder::new().layer_id(layer).max_rect(screen));
+    let (edge, corner) = if over_control(ctx, layer) { (RESIZE_GRIP, RESIZE_GRIP) } else { (RESIZE_EDGE, RESIZE_CORNER) };
+    for (i, (r, dir, cursor)) in resize_zones(screen, edge, corner).into_iter().enumerate() {
+        let resp = zones.interact(r, egui::Id::new(("wc_window_resize", i)), Sense::drag()).on_hover_cursor(cursor);
+        if resp.drag_started_by(egui::PointerButton::Primary) {
             ctx.send_viewport_cmd(ViewportCommand::BeginResize(dir));
+            handed_to_os(ctx);
         }
     }
+}
+
+/// Whether the pointer is over an enabled clickable or draggable widget smaller than
+/// [`CONTROL_MAX`], other than the zones and the title bar's drag area (last frame's widgets).
+fn over_control(ctx: &egui::Context, zones: egui::LayerId) -> bool {
+    let Some(p) = ctx.pointer_latest_pos() else { return false };
+    if !in_resize_reach(ctx.content_rect(), p) {
+        return false;
+    }
+    ctx.viewport(|v| {
+        v.prev_pass.widgets.layers().filter(|(l, _)| **l != zones).flat_map(|(_, ws)| ws.iter()).any(|w| {
+            w.enabled
+                && (w.sense.senses_click() || w.sense.senses_drag())
+                && w.id != title_drag_id()
+                && w.interact_rect.contains(p)
+                && w.interact_rect.size().min_elem() < CONTROL_MAX
+        })
+    })
+}
+
+/// Whether `p` can be in a resize zone of a window with content rect `w`. The zones include their
+/// inner boundary, so this does too.
+fn in_resize_reach(w: Rect, p: egui::Pos2) -> bool {
+    p.x <= w.left() + RESIZE_CORNER || p.x >= w.right() - RESIZE_CORNER || p.y <= w.top() + RESIZE_CORNER || p.y >= w.bottom() - RESIZE_CORNER
+}
+
+/// The edge (`e` thick) and corner (`c` square) resize zones of a window with content rect `w`.
+/// Corners come last, so they win where they overlap the edges.
+fn resize_zones(w: Rect, e: f32, c: f32) -> [(Rect, ResizeDirection, CursorIcon); 8] {
+    use ResizeDirection::*;
+    [
+        (Rect::from_min_max(w.left_top(), pos2(w.right(), w.top() + e)), North, CursorIcon::ResizeVertical),
+        (Rect::from_min_max(pos2(w.left(), w.bottom() - e), w.right_bottom()), South, CursorIcon::ResizeVertical),
+        (Rect::from_min_max(w.left_top(), pos2(w.left() + e, w.bottom())), West, CursorIcon::ResizeHorizontal),
+        (Rect::from_min_max(pos2(w.right() - e, w.top()), w.right_bottom()), East, CursorIcon::ResizeHorizontal),
+        (Rect::from_min_size(w.left_top(), vec2(c, c)), NorthWest, CursorIcon::ResizeNwSe),
+        (Rect::from_min_size(w.right_top() - vec2(c, 0.0), vec2(c, c)), NorthEast, CursorIcon::ResizeNeSw),
+        (Rect::from_min_size(w.left_bottom() - vec2(0.0, c), vec2(c, c)), SouthWest, CursorIcon::ResizeNeSw),
+        (Rect::from_min_size(w.right_bottom() - vec2(c, c), vec2(c, c)), SouthEast, CursorIcon::ResizeNwSe),
+    ]
 }
 
 pub fn status_bar(app: &mut WordApp, ui: &mut Ui) {
@@ -771,6 +809,144 @@ mod tests {
         let button = |pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
         frame(ctx, n, vec![egui::Event::PointerMoved(pos), button(true)], a);
         frame(ctx, n, vec![button(false)], a);
+    }
+
+    /// Input for the next frame of a 1200 x 800 window.
+    fn window_input(n: &mut u32, events: Vec<egui::Event>) -> egui::RawInput {
+        *n += 1;
+        egui::RawInput {
+            time: Some(f64::from(*n) / 60.0),
+            predicted_dt: 1.0 / 60.0,
+            screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(1200.0, 800.0))),
+            events,
+            ..Default::default()
+        }
+    }
+
+    /// Runs a frameless-window frame and returns its viewport commands.
+    fn frameless(ctx: &egui::Context, n: &mut u32, a: &mut WordApp, events: Vec<egui::Event>, maximized: bool) -> Vec<ViewportCommand> {
+        let mut input = window_input(n, events);
+        input.viewports.entry(egui::ViewportId::ROOT).or_default().maximized = Some(maximized);
+        let mut out = ctx.run_ui(input, |ui| {
+            title_bar(a, ui);
+            window_frame(a, ui);
+        });
+        out.textures_delta.clear();
+        out.viewport_output.into_values().flat_map(|v| v.commands).collect()
+    }
+
+    /// Starts a drag without releasing the button, as when the window manager takes it over.
+    fn press_and_drag(ctx: &egui::Context, n: &mut u32, a: &mut WordApp, from: egui::Pos2, maximized: bool) -> Vec<ViewportCommand> {
+        let press = egui::Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() };
+        let mut sent = frameless(ctx, n, a, vec![egui::Event::PointerMoved(from), press], maximized);
+        for dx in [3.0, 10.0, 20.0] {
+            sent.extend(frameless(ctx, n, a, vec![egui::Event::PointerMoved(from + vec2(dx, 0.0))], maximized));
+        }
+        sent
+    }
+
+    #[test]
+    fn every_resize_zone_point_is_in_resize_reach() {
+        for size in [vec2(1200.0, 800.0), vec2(24.0, 24.0), vec2(20.0, 300.0)] {
+            let w = Rect::from_min_size(pos2(10.0, 20.0), size);
+            for (zone, ..) in resize_zones(w, RESIZE_EDGE, RESIZE_CORNER) {
+                for p in [zone.min, zone.max, zone.left_bottom(), zone.right_top(), zone.center()] {
+                    assert!(in_resize_reach(w, p), "{p:?} of {zone:?} in a {size:?} window");
+                }
+            }
+        }
+        let w = Rect::from_min_size(egui::Pos2::ZERO, vec2(1200.0, 800.0));
+        assert!(!in_resize_reach(w, pos2(12.5, 12.5)), "just inside the corners");
+        assert!(!in_resize_reach(w, w.center()));
+    }
+
+    #[test]
+    fn frameless_window_resizes_from_its_edges_above_the_title_bar() {
+        let mut a = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), crate::Services::default());
+        a.window_controls = true;
+        let (ctx, mut n) = (ctx(), 0);
+        frameless(&ctx, &mut n, &mut a, vec![], false);
+        let resize = |sent: &[ViewportCommand]| {
+            sent.iter().find_map(|c| match c {
+                ViewportCommand::BeginResize(d) => Some(*d),
+                _ => None,
+            })
+        };
+        for (at, want) in [
+            (pos2(600.0, 2.0), ResizeDirection::North),
+            (pos2(600.0, 797.0), ResizeDirection::South),
+            (pos2(2.0, 400.0), ResizeDirection::West),
+            (pos2(1197.0, 400.0), ResizeDirection::East),
+            (pos2(2.0, 2.0), ResizeDirection::NorthWest),
+            (pos2(1197.0, 797.0), ResizeDirection::SouthEast),
+        ] {
+            let sent = press_and_drag(&ctx, &mut n, &mut a, at, false);
+            assert_eq!(resize(&sent), Some(want), "a press at {at:?}: {sent:?}");
+            assert!(!sent.contains(&ViewportCommand::StartDrag), "the edge zone takes the press, not the title bar: {sent:?}");
+        }
+        // No press above was released, yet each next one still starts a move or a resize.
+        let sent = press_and_drag(&ctx, &mut n, &mut a, pos2(500.0, 19.0), false);
+        assert!(sent.contains(&ViewportCommand::StartDrag), "{sent:?}");
+        let sent = press_and_drag(&ctx, &mut n, &mut a, pos2(1197.0, 400.0), false);
+        assert_eq!(resize(&sent), Some(ResizeDirection::East), "{sent:?}");
+        // A maximized window has no resize zones: the top edge is the title bar again.
+        frameless(&ctx, &mut n, &mut a, vec![], true);
+        let sent = press_and_drag(&ctx, &mut n, &mut a, pos2(600.0, 2.0), true);
+        assert_eq!(resize(&sent), None, "{sent:?}");
+        assert!(sent.contains(&ViewportCommand::StartDrag), "{sent:?}");
+    }
+
+    /// Runs a frame of the whole app.
+    fn app_frame(ctx: &egui::Context, n: &mut u32, a: &mut WordApp, events: Vec<egui::Event>) -> egui::FullOutput {
+        let mut out = ctx.run_ui(window_input(n, events), |ui| {
+            a.logic(&ui.ctx().clone());
+            a.ui(ui);
+        });
+        out.textures_delta.clear();
+        out
+    }
+
+    #[test]
+    fn resize_zones_yield_to_edge_controls_and_caption_buttons() {
+        let mut a = WordApp::new(wordcraft_engine::Session::new(wordcraft_engine::sample::sample_document()), crate::Services::default());
+        a.window_controls = true;
+        let (ctx, mut n) = (ctx(), 0);
+        ctx.enable_accesskit();
+        let mut out = app_frame(&ctx, &mut n, &mut a, vec![]);
+        for _ in 0..2 {
+            out = app_frame(&ctx, &mut n, &mut a, vec![]);
+        }
+        let update = out.platform_output.accesskit_update.take().unwrap();
+        let labels: Vec<&str> = update.nodes.iter().filter_map(|(_, node)| node.label()).collect();
+        for want in ["Minimize", "Maximize", "Close"] {
+            assert!(labels.contains(&want), "{want} in {labels:?}");
+        }
+        // The document's scroll bar runs along the right edge: 5 pt in it keeps the drag, and only
+        // the outer 3 pt resizes the window.
+        for (x, resizes) in [(1195.0, false), (1198.5, true)] {
+            let p = pos2(x, 300.0);
+            let button =
+                |pressed| egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
+            let mut sent = Vec::new();
+            for events in
+                [vec![egui::Event::PointerMoved(p)], vec![button(true)], vec![egui::Event::PointerMoved(p + vec2(0.0, 20.0))], vec![button(false)]]
+            {
+                sent.extend(app_frame(&ctx, &mut n, &mut a, events).viewport_output.into_values().flat_map(|v| v.commands));
+            }
+            assert_eq!(sent.contains(&ViewportCommand::BeginResize(ResizeDirection::East)), resizes, "a drag at x = {x}: {sent:?}");
+        }
+        // A press in a caption button's top points clicks the button; it never resizes or moves.
+        for (i, want) in [ViewportCommand::Minimized(true), ViewportCommand::Maximized(true), ViewportCommand::Close].into_iter().enumerate() {
+            let p = pos2(1200.0 - (3 - i) as f32 * CONTROL_W + CONTROL_W / 2.0, 1.5);
+            let button =
+                |pressed| egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
+            let mut sent = Vec::new();
+            for events in [vec![egui::Event::PointerMoved(p)], vec![button(true)], vec![button(false)]] {
+                sent.extend(app_frame(&ctx, &mut n, &mut a, events).viewport_output.into_values().flat_map(|v| v.commands));
+            }
+            assert!(sent.contains(&want), "button {i}: {sent:?}");
+            assert!(!sent.iter().any(|c| matches!(c, ViewportCommand::BeginResize(_) | ViewportCommand::StartDrag)), "button {i}: {sent:?}");
+        }
     }
 
     /// #701: the arrow beside Undo lists the session's undo steps, newest first; clicking the third
